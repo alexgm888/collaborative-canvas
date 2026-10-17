@@ -11,23 +11,28 @@ Real-time collaborative canvas built with React, TypeScript and WebSockets.
 ```
 packages/
   client/   React + TypeScript + Vite (canvas)
-  server/   Node.js + TypeScript (API y servidor de estáticos)
+  server/   Node.js + TypeScript (API, PostgreSQL y servidor de estáticos)
+  shared/   Tipos compartidos entre cliente y servidor
 DECISIONES.md   Registro de decisiones técnicas
 ```
 
 ## Requisitos
 
 - Node.js 20 o superior
+- PostgreSQL 17 (lo más cómodo: Docker con `docker compose`)
 
 ## Desarrollo
 
 ```bash
 npm install
+docker compose up -d   # PostgreSQL local en el puerto 5432
 npm run dev
 ```
 
 - Cliente: http://localhost:5173
 - Servidor: http://localhost:3001 (`/api/health`)
+
+Sin `DATABASE_URL`, el servidor se conecta a la base de datos de `docker-compose.yml`. Para usar otra, define `DATABASE_URL` (por ejemplo `postgres://usuario:clave@host:5432/bd`). Las migraciones se aplican solas al arrancar.
 
 ## Scripts
 
@@ -43,14 +48,14 @@ npm run dev
 
 ```bash
 docker build -t collaborative-canvas .
-docker run -p 3001:3001 collaborative-canvas
+docker run -p 3001:3001 -e DATABASE_URL=postgres://... collaborative-canvas
 ```
 
 La imagen contiene el servidor y el cliente compilado; abre http://localhost:3001.
 
 ## Despliegue
 
-En [Railway](https://railway.com), con el repositorio enlazado: cada push a `main` construye el `Dockerfile` y despliega. Los motivos están en la decisión 006 de `DECISIONES.md`.
+En [Railway](https://railway.com), con el repositorio enlazado: cada push a `main` construye el `Dockerfile` y despliega. PostgreSQL es un servicio del mismo proyecto y el servidor recibe su `DATABASE_URL` como variable de entorno. Los motivos están en la decisión 006 de `DECISIONES.md`.
 
 ## Licencia
 

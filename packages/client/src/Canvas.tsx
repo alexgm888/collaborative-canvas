@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
-import type { Point, Stroke } from './types';
+import type { Point, Stroke } from '@canvas/shared';
 
 interface CanvasProps {
   color: string;
@@ -52,8 +52,11 @@ export function Canvas({ color, width }: CanvasProps) {
 
     const resize = () => {
       const { width: w, height: h } = canvas.getBoundingClientRect();
-      canvas.width = Math.round(w);
-      canvas.height = Math.round(h);
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+      // Resizing resets the context; scale it so strokes keep using CSS pixels.
+      canvas.getContext('2d')?.setTransform(dpr, 0, 0, dpr, 0, 0);
       redraw(strokes, currentRef.current);
     };
 

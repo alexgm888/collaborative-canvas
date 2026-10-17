@@ -28,9 +28,10 @@ body {
 
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 8px 16px;
   padding: 8px 16px;
   background: #fff;
   border-bottom: 1px solid #e5e7eb;
@@ -39,10 +40,12 @@ body {
 .toolbar h1 {
   margin: 0;
   font-size: 1.1rem;
+  white-space: nowrap;
 }
 
 .tools {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }

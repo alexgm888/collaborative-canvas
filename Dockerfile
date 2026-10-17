@@ -2,11 +2,10 @@
 FROM node:22-alpine AS build
 WORKDIR /app
 
-COPY package.json package-lock.json* tsconfig.base.json ./
+COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages/client/package.json packages/client/
 COPY packages/server/package.json packages/server/
-# TODO: con package-lock.json en el repo, cambiar a `npm ci`.
-RUN npm install
+RUN npm ci
 
 COPY packages ./packages
 RUN npm run build
@@ -17,9 +16,9 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3001
 
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json ./
 COPY packages/server/package.json packages/server/
-RUN npm install --omit=dev -w @canvas/server
+RUN npm ci --omit=dev -w @canvas/server
 
 COPY --from=build /app/packages/server/dist packages/server/dist
 COPY --from=build /app/packages/client/dist packages/client/dist

@@ -41,6 +41,9 @@ Formato de cada entrada: **contexto → decisión → alternativas → consecuen
 - **Alternativas:** cliente en un hosting estático y servidor aparte (más piezas y CORS/WebSockets entre orígenes).
 - **Consecuencias:** un solo servicio que desplegar. Sin CDN para estáticos; aceptable para este proyecto.
 
-## Pendientes de decidir
+## 006 · Despliegue en Railway
 
-- Plataforma de despliegue (Railway, Fly.io o Azure).
+- **Contexto:** hace falta un contenedor siempre encendido (WebSockets desde la semana 3) y PostgreSQL desde la semana 2, con poco presupuesto y 8-10 h semanales.
+- **Decisión:** Railway, con el repo de GitHub enlazado: construye el `Dockerfile` y despliega en cada push a `main`. Se empieza en el plan gratuito y se pasa a Hobby (5 $/mes) al añadir PostgreSQL.
+- **Alternativas:** Fly.io (sin capa gratuita y PostgreSQL gestionado desde 38 $/mes); Azure Container Apps + PostgreSQL Flexible Server (más configuración y hay que fijar una réplica para no cortar los WebSockets); un VPS propio (más barato a precio fijo, pero el sistema, HTTPS, reinicios y copias de seguridad corren de mi cuenta).
+- **Consecuencias:** desplegar no cuesta tiempo y PostgreSQL vive en el mismo proyecto. A cambio hay menos control sobre la infraestructura y dependencia de un proveedor pequeño, mitigada por el contenedor: mudarse a otra plataforma solo cambia la configuración.

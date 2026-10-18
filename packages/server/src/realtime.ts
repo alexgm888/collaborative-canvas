@@ -10,6 +10,7 @@ import {
   isCanvasId,
   parseCursor,
   parseProfile,
+  parseSince,
   parseStroke,
 } from './validation.js';
 
@@ -24,7 +25,8 @@ const MAX_MESSAGE_BYTES = 1024 * 1024;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
 // A client that cannot keep up would make the server buffer every stroke for
-// it. Past this point it is disconnected; it reconnects and gets a snapshot.
+// it. Past this point it is disconnected; it reconnects and catches up from
+// the last stroke it has.
 const MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
 
 // Cursors and strokes in progress are only worth sending while they are
@@ -109,6 +111,9 @@ function rejectUpgrade(socket: Duplex, status: string): void {
  * per canvas. A stroke is saved first and then sent to everyone else in the
  * room, so nobody sees a stroke that a page reload would lose.
  *
+ * Every saved stroke carries its seq in the canvas. A client that reconnects
+ * says up to which seq it has everything and gets only the strokes after it.
+ *
  * Cursors and strokes in progress are ephemeral: they are relayed at once,
  * never saved, and dropped when a client sends too many or cannot keep up.
  */
@@ -183,14 +188,23 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
     }
 
     const result = await store.insertStroke(conn.canvasId, parsed.value);
-    if (result === 'canvas-not-found') {
-      send(conn.socket, { type: 'not-found' });
-      conn.socket.close(CLOSE_CANVAS_NOT_FOUND, 'Canvas not found');
-      return;
+    switch (result.status) {
+      case 'canvas-not-found':
+        send(conn.socket, { type: 'not-found' });
+        conn.socket.close(CLOSE_CANVAS_NOT_FOUND, 'Canvas not found');
+        return;
+      case 'id-taken':
+        send(conn.socket, { type: 'rejected', id: parsed.value.id, error: 'stroke id in use' });
+        broadcast(conn, { type: 'live-cancel', peerId: conn.peer.id, id: parsed.value.id });
+        return;
+      case 'created':
+        broadcast(conn, { type: 'stroke', stroke: { ...parsed.value, seq: result.seq } });
+        break;
+      case 'duplicate':
+        // Already broadcast when it was first saved.
+        break;
     }
-    // A duplicate was already broadcast when it was first saved.
-    if (result === 'created') broadcast(conn, { type: 'stroke', stroke: parsed.value });
-    send(conn.socket, { type: 'ack', id: parsed.value.id });
+    send(conn.socket, { type: 'ack', id: parsed.value.id, seq: result.seq });
   }
 
   function parseMessage(conn: Connection, data: RawData, isBinary: boolean) {
@@ -213,6 +227,7 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
     socket: WebSocket,
     canvasId: string,
     profile: { name: string; color: string },
+    since: number,
   ): Promise<void> {
     const conn: Connection = {
       socket,
@@ -257,7 +272,8 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
     });
 
     try {
-      if (!(await store.canvasExists(canvasId))) {
+      const lastSeq = await store.getLastSeq(canvasId);
+      if (lastSeq === null) {
         send(socket, { type: 'not-found' });
         socket.close(CLOSE_CANVAS_NOT_FOUND, 'Canvas not found');
         return;
@@ -267,8 +283,12 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
       // Join before reading, so a stroke saved meanwhile is either in the
       // snapshot or broadcast to us (maybe both; the client merges by id).
       join(conn);
-      const strokes = await store.listStrokes(canvasId);
-      send(socket, { type: 'snapshot', strokes });
+      // Seqs only grow, so a client ahead of the canvas got them from
+      // somewhere else (a restored database, a bug). Its strokes cannot be
+      // trusted: it gets everything and replaces what it has.
+      const from = since <= lastSeq ? since : 0;
+      const strokes = await store.listStrokes(canvasId, from);
+      send(socket, { type: 'snapshot', since: from, strokes });
     } catch (err) {
       console.error(`Joining ${canvasId} failed:`, err);
       socket.close(CLOSE_INTERNAL_ERROR, 'Internal error');
@@ -283,7 +303,8 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
       return;
     }
     const profile = parseProfile(searchParams);
-    wss.handleUpgrade(req, socket, head, (ws) => void onConnection(ws, canvasId, profile));
+    const since = parseSince(searchParams.get('since'));
+    wss.handleUpgrade(req, socket, head, (ws) => void onConnection(ws, canvasId, profile, since));
   });
 
   const heartbeat = setInterval(() => {

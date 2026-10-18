@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type pg from 'pg';
-import { canvasExists, createCanvas, insertStroke, listStrokes } from './db/canvases.js';
+import { createCanvas, getLastSeq, insertStroke, listStrokes } from './db/canvases.js';
 import { isDatabaseUp } from './db/pool.js';
 import { isCanvasId, parseStroke } from './validation.js';
 
@@ -85,7 +85,7 @@ async function route(
   if (!match[2] && method === 'GET') {
     // Two queries without a transaction: a stroke saved in between is either
     // included or not, both are valid snapshots.
-    if (!(await canvasExists(pool, canvasId))) throw new HttpError(404, 'Canvas not found');
+    if ((await getLastSeq(pool, canvasId)) === null) throw new HttpError(404, 'Canvas not found');
     const strokes = await listStrokes(pool, canvasId);
     return sendJson(res, 200, { id: canvasId, strokes });
   }
@@ -95,9 +95,13 @@ async function route(
     if (!parsed.ok) throw new HttpError(400, parsed.error);
 
     const result = await insertStroke(pool, canvasId, parsed.value);
-    if (result === 'canvas-not-found') throw new HttpError(404, 'Canvas not found');
+    if (result.status === 'canvas-not-found') throw new HttpError(404, 'Canvas not found');
+    if (result.status === 'id-taken') throw new HttpError(409, 'Stroke id already in use');
     // 200 on a duplicate id: the client retried a stroke that was already saved.
-    return sendJson(res, result === 'created' ? 201 : 200, { id: parsed.value.id });
+    return sendJson(res, result.status === 'created' ? 201 : 200, {
+      id: parsed.value.id,
+      seq: result.seq,
+    });
   }
 
   throw new HttpError(405, 'Method not allowed');

@@ -4,7 +4,7 @@ Real-time collaborative canvas built with React, TypeScript and WebSockets.
 
 **Demo:** https://collaborative-canvas-production-1837.up.railway.app
 
-> **Estado:** en desarrollo (semana 4 de 8). Cada lienzo tiene su propia URL (`/c/<id>`) y quien la abra dibuja en el mismo lienzo en tiempo real: se ven los trazos de los demás mientras los dibujan, sus cursores con nombre y quién está conectado. Cada trazo terminado se guarda en PostgreSQL; si se corta la conexión, los pendientes se reenvían al volver. La reconexión sin descargar el lienzo entero llega en la semana 5.
+> **Estado:** en desarrollo (semana 5 de 8). Cada lienzo tiene su propia URL (`/c/<id>`) y quien la abra dibuja en el mismo lienzo en tiempo real: se ven los trazos de los demás mientras los dibujan, sus cursores con nombre y quién está conectado. Cada trazo terminado se guarda en PostgreSQL con un número de secuencia propio del lienzo; si se corta la conexión, los pendientes se reenvían al volver y solo se descargan los trazos que faltan.
 
 ## Estructura
 
@@ -53,24 +53,24 @@ Al abrir `/` se crea un lienzo nuevo y la URL pasa a `/c/<id>`; comparte esa URL
 
 ### API
 
-| Método y ruta                    | Qué hace                                                                      |
-| -------------------------------- | ----------------------------------------------------------------------------- |
-| `POST /api/canvases`             | Crea un lienzo. `201 { id }`                                                  |
-| `GET /api/canvases/:id`          | Lienzo con sus trazos en orden. `200 { id, strokes }` o `404`                 |
-| `POST /api/canvases/:id/strokes` | Guarda un trazo. `201` si es nuevo, `200` si ese `id` ya existía, `400`/`404` |
-| `GET /api/health`                | Estado del servidor y de la base de datos. `200` o `503`                      |
+| Método y ruta                    | Qué hace                                                                                        |
+| -------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `POST /api/canvases`             | Crea un lienzo. `201 { id }`                                                                    |
+| `GET /api/canvases/:id`          | Lienzo con sus trazos en orden (cada uno con su `seq`). `200 { id, strokes }` o `404`           |
+| `POST /api/canvases/:id/strokes` | Guarda un trazo. `201 { id, seq }` si es nuevo, `200` si ese `id` ya existía, `400`/`404`/`409` |
+| `GET /api/health`                | Estado del servidor y de la base de datos. `200` o `503`                                        |
 
 ### Tiempo real
 
-El cliente abre un WebSocket en `/api/canvases/:id/ws?name=…&color=…` por lienzo; `name` y `color` son el seudónimo con el que le ven los demás. Los mensajes son JSON y sus tipos están en `packages/shared` (`ClientMessage` y `ServerMessage`):
+El cliente abre un WebSocket en `/api/canvases/:id/ws?name=…&color=…&since=…` por lienzo; `name` y `color` son el seudónimo con el que le ven los demás y `since`, el último `seq` hasta el que tiene todos los trazos (0 la primera vez). Los mensajes son JSON y sus tipos están en `packages/shared` (`ClientMessage` y `ServerMessage`):
 
 | Dirección          | Mensaje                                        | Cuándo                                                           |
 | ------------------ | ---------------------------------------------- | ---------------------------------------------------------------- |
 | servidor → cliente | `welcome { peers }`                            | Al entrar en la sala: quién más está y dónde tiene el cursor     |
-| servidor → cliente | `snapshot { strokes }`                         | Después (y en cada reconexión): el lienzo completo               |
+| servidor → cliente | `snapshot { since, strokes }`                  | Después: los trazos con `seq` mayor que `since`, en orden        |
 | cliente → servidor | `stroke { stroke }`                            | Al terminar un trazo, y otra vez al reconectar si no hubo ack    |
-| servidor → cliente | `ack { id }`                                   | El trazo está guardado                                           |
-| servidor → cliente | `stroke { stroke }`                            | Otro usuario del mismo lienzo terminó un trazo                   |
+| servidor → cliente | `ack { id, seq }`                              | El trazo está guardado con ese `seq`                             |
+| servidor → cliente | `stroke { stroke }`                            | Otro usuario del mismo lienzo terminó un trazo (con su `seq`)    |
 | servidor → cliente | `rejected { id, error }`                       | El trazo no es válido y no se guardará                           |
 | servidor → cliente | `not-found` y cierre `4404`                    | El lienzo no existe                                              |
 | cliente → servidor | `live { stroke }`                              | Mientras se dibuja, hasta 20 por segundo, solo los puntos nuevos |
@@ -82,6 +82,8 @@ El cliente abre un WebSocket en `/api/canvases/:id/ws?name=…&color=…` por li
 
 `live` y `cursor` son efímeros: no se guardan, no esperan a la base de datos y el servidor los descarta si un cliente envía demasiados o no da abasto para recibirlos (decisión 011).
 
+Cada lienzo numera sus trazos guardados 1, 2, 3… sin huecos, y todos los clientes los dibujan en ese orden. Al reconectar, el cliente pide los posteriores al último número que tiene sin huecos, no al mayor que ha visto (decisión 012).
+
 Sin `DATABASE_URL`, el servidor se conecta a la base de datos de `docker-compose.yml`. Para usar otra, define `DATABASE_URL` (por ejemplo `postgres://usuario:clave@host:5432/bd`). Las migraciones se aplican solas al arrancar.
 
 ## Scripts
@@ -92,7 +94,7 @@ Sin `DATABASE_URL`, el servidor se conecta a la base de datos de `docker-compose
 | `npm run build`     | Compila cliente y servidor               |
 | `npm run lint`      | ESLint sobre todo el repo                |
 | `npm run typecheck` | Comprobación de tipos en ambos paquetes  |
-| `npm test`          | Tests (de momento, los del servidor)     |
+| `npm test`          | Tests del servidor y del cliente         |
 | `npm run format`    | Formatea el código con Prettier          |
 
 ## Docker

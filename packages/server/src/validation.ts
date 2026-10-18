@@ -117,3 +117,12 @@ export function parseProfile(params: URLSearchParams): { name: string; color: st
     color: COLOR_RE.test(color) ? color.toLowerCase() : DEFAULT_PROFILE.color,
   };
 }
+
+/**
+ * The `since` of the WebSocket URL: the seq a reconnecting client has every
+ * stroke up to. Missing or invalid means it has none, so it gets them all.
+ */
+export function parseSince(value: string | null): number {
+  if (value === null || !/^\d{1,15}$/.test(value)) return 0;
+  return Number(value);
+}

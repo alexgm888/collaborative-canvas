@@ -15,8 +15,19 @@ export interface Stroke {
   points: Point[];
 }
 
+/**
+ * A stroke as saved by the server. `seq` numbers the strokes of each canvas
+ * 1, 2, 3… with no gaps, in the order they were saved: it is the order every
+ * client draws them in, and what a client that reconnects resumes from.
+ */
+export interface SavedStroke extends Stroke {
+  seq: number;
+}
+
 // --- Real-time protocol -----------------------------------------------------
 // One WebSocket per open canvas, at `/api/canvases/:id/ws`. Messages are JSON.
+// The query string carries the client's profile (`name`, `color`) and, when
+// reconnecting, `since`: the highest seq up to which it has every stroke.
 // This package only holds types: the server's runtime never imports it.
 
 /** Someone else with the canvas open. Names and colors are chosen by each client. */
@@ -45,12 +56,19 @@ export type ClientMessage =
 export type ServerMessage =
   /** Sent as soon as you join the room: who else is here. */
   | { type: 'welcome'; peers: Peer[] }
-  /** Every stroke saved so far, in order. Arrives after `welcome`. */
-  | { type: 'snapshot'; strokes: Stroke[] }
-  /** A stroke drawn by someone else in the same canvas, already saved. */
-  | { type: 'stroke'; stroke: Stroke }
-  /** Your stroke with this id is saved (also sent when it already was). */
-  | { type: 'ack'; id: string }
+  /**
+   * The saved strokes with a seq above `since`, in order. Arrives after
+   * `welcome`. `since` is the one the client asked for, or 0 when the server
+   * sends everything instead because it does not know the client's seq.
+   */
+  | { type: 'snapshot'; since: number; strokes: SavedStroke[] }
+  /**
+   * A stroke drawn by someone else in the same canvas, already saved. Strokes
+   * saved at the same time by different people may arrive out of seq order.
+   */
+  | { type: 'stroke'; stroke: SavedStroke }
+  /** Your stroke with this id is saved as `seq` (also sent when it already was). */
+  | { type: 'ack'; id: string; seq: number }
   /** Your stroke with this id is invalid and will never be saved. */
   | { type: 'rejected'; id: string | null; error: string }
   /** The canvas does not exist; the server closes the connection after this. */

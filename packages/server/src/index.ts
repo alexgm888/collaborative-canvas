@@ -4,8 +4,9 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { handleApi, sendJson } from './api.js';
 import { migrate } from './db/migrate.js';
-import { createPool, isDatabaseUp } from './db/pool.js';
+import { createPool } from './db/pool.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
 
@@ -38,11 +39,6 @@ const MIME_TYPES: Record<string, string> = {
   '.png': 'image/png',
 };
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-  res.end(JSON.stringify(body));
-}
-
 async function serveStatic(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const { pathname } = new URL(req.url ?? '/', 'http://localhost');
   const requested = normalize(pathname).replace(/^(\.\.[/\\])+/, '');
@@ -64,26 +60,11 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse): Promise<v
   }
 }
 
-async function health(res: ServerResponse): Promise<void> {
-  const dbUp = await isDatabaseUp(pool);
-  // 503 lets the platform see the instance as unhealthy while the database is down.
-  sendJson(res, dbUp ? 200 : 503, {
-    status: dbUp ? 'ok' : 'degraded',
-    database: dbUp ? 'up' : 'down',
-    uptime: process.uptime(),
-  });
-}
-
 const server = createServer((req, res) => {
   const { pathname } = new URL(req.url ?? '/', 'http://localhost');
 
-  if (pathname === '/api/health') {
-    void health(res);
-    return;
-  }
-
   if (pathname.startsWith('/api/')) {
-    sendJson(res, 404, { error: 'Not found' });
+    void handleApi(pool, req, res, pathname);
     return;
   }
 

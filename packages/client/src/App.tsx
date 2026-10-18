@@ -61,6 +61,8 @@ interface CanvasActions {
   addStroke: (stroke: Stroke) => void;
   updateLiveStroke: (stroke: Stroke) => void;
   moveCursor: (position: Point | null) => void;
+  undo: () => void;
+  redo: () => void;
 }
 
 /** Opens a live connection to the canvas while it is shown. */
@@ -87,10 +89,33 @@ function useCanvasConnection(
       addStroke: (stroke) => connection?.addStroke(stroke),
       updateLiveStroke: (stroke) => connection?.updateLiveStroke(stroke),
       moveCursor: (position) => connection?.moveCursor(position),
+      undo: () => connection?.undo(),
+      redo: () => connection?.redo(),
     }),
     [connection],
   );
   return { state, actions };
+}
+
+/** Ctrl+Z undoes; Ctrl+Shift+Z and Ctrl+Y redo (Cmd on macOS). */
+function useUndoShortcuts({ undo, redo }: CanvasActions): void {
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      // Text fields keep their own undo.
+      const target = e.target as HTMLElement | null;
+      if (target?.isContentEditable || target?.matches('textarea, input:not([type=range])')) {
+        return;
+      }
+      const key = e.key.toLowerCase();
+      if (key === 'z' && !e.shiftKey) undo();
+      else if ((key === 'z' && e.shiftKey) || key === 'y') redo();
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [undo, redo]);
 }
 
 function syncLabel({ status, pending, rejected }: CanvasState): string {
@@ -111,6 +136,8 @@ export function App() {
     identity,
   );
 
+  useUndoShortcuts(actions);
+
   const loaded = state?.loaded === true;
   const notFound = state?.status === 'not-found';
   const syncFailed = state !== null && (state.rejected > 0 || state.status !== 'online');
@@ -130,6 +157,24 @@ export function App() {
               onClick={() => setColor(c)}
             />
           ))}
+          <div className="history">
+            <button
+              type="button"
+              onClick={actions.undo}
+              disabled={!state?.canUndo}
+              title="Deshacer tu último trazo (Ctrl+Z)"
+            >
+              Deshacer
+            </button>
+            <button
+              type="button"
+              onClick={actions.redo}
+              disabled={!state?.canRedo}
+              title="Rehacer (Ctrl+Shift+Z)"
+            >
+              Rehacer
+            </button>
+          </div>
           <label className="width">
             Grosor
             <input

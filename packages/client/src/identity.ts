@@ -2,6 +2,11 @@
 export interface Identity {
   name: string;
   color: string;
+  /**
+   * Marks the strokes this tab may undo. Unlike the presence id, it survives
+   * reconnections and reloads, and the server never shows it to others.
+   */
+  userId: string;
 }
 
 const ANIMALS = [
@@ -35,7 +40,7 @@ function pick<T>(items: readonly T[]): T {
 
 function isIdentity(value: unknown): value is Identity {
   const v = value as Partial<Identity> | null;
-  return typeof v?.name === 'string' && typeof v.color === 'string';
+  return typeof v?.name === 'string' && typeof v.color === 'string' && typeof v.userId === 'string';
 }
 
 /**
@@ -49,11 +54,15 @@ export function loadIdentity(): Identity {
   } catch {
     // Unavailable storage or a corrupt value: make a new identity.
   }
-  const identity = { name: `${pick(ANIMALS)} ${pick(ADJECTIVES)}`, color: pick(COLORS) };
+  const identity = {
+    name: `${pick(ANIMALS)} ${pick(ADJECTIVES)}`,
+    color: pick(COLORS),
+    userId: crypto.randomUUID(),
+  };
   try {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(identity));
   } catch {
-    // Without storage the name changes on reload; nothing else depends on it.
+    // Without storage a reload makes a new person: same as a new tab.
   }
   return identity;
 }

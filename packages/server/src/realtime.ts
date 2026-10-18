@@ -12,6 +12,8 @@ import {
   parseProfile,
   parseSince,
   parseStroke,
+  parseUserId,
+  parseVisibility,
 } from './validation.js';
 
 const WS_PATH_RE = /^\/api\/canvases\/([^/]+)\/ws$/;
@@ -80,7 +82,15 @@ interface Connection {
   alive: boolean;
   /** False until the canvas is known to exist; only joined peers are visible. */
   joined: boolean;
+  /**
+   * Operations of others saved before this connection's snapshot was sent;
+   * null once it was. They go out right after the snapshot, so a client never
+   * gets an operation before the snapshot it builds on.
+   */
+  backlog: ServerMessage[] | null;
   peer: Peer;
+  /** Who may undo the strokes saved through this connection; null is nobody. */
+  userId: string | null;
   limiter: RateLimiter;
 }
 
@@ -113,6 +123,8 @@ function rejectUpgrade(socket: Duplex, status: string): void {
  *
  * Every saved stroke carries its seq in the canvas. A client that reconnects
  * says up to which seq it has everything and gets only the strokes after it.
+ * Undo and redo are saved operations too (visibility changes), numbered in the
+ * same seq, and only the author of a stroke can make them.
  *
  * Cursors and strokes in progress are ephemeral: they are relayed at once,
  * never saved, and dropped when a client sends too many or cannot keep up.
@@ -125,6 +137,15 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
   function broadcast(from: Connection, message: ServerMessage, sendTo: Sender = send): void {
     for (const other of rooms.get(from.canvasId) ?? []) {
       if (other !== from) sendTo(other.socket, message);
+    }
+  }
+
+  /** Broadcasts a saved operation, holding it for whoever still waits for a snapshot. */
+  function broadcastSaved(from: Connection, message: ServerMessage): void {
+    for (const other of rooms.get(from.canvasId) ?? []) {
+      if (other === from) continue;
+      if (other.backlog) other.backlog.push(message);
+      else send(other.socket, message);
     }
   }
 
@@ -187,7 +208,7 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
       return;
     }
 
-    const result = await store.insertStroke(conn.canvasId, parsed.value);
+    const result = await store.insertStroke(conn.canvasId, parsed.value, conn.userId);
     switch (result.status) {
       case 'canvas-not-found':
         send(conn.socket, { type: 'not-found' });
@@ -198,13 +219,55 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
         broadcast(conn, { type: 'live-cancel', peerId: conn.peer.id, id: parsed.value.id });
         return;
       case 'created':
-        broadcast(conn, { type: 'stroke', stroke: { ...parsed.value, seq: result.seq } });
+        broadcastSaved(conn, { type: 'stroke', stroke: { ...parsed.value, seq: result.seq } });
         break;
       case 'duplicate':
         // Already broadcast when it was first saved.
         break;
     }
     send(conn.socket, { type: 'ack', id: parsed.value.id, seq: result.seq });
+  }
+
+  /** An undo or redo: saved only if this connection's user drew the stroke. */
+  async function handleChange(conn: Connection, change: unknown): Promise<void> {
+    const changeId = (change as { id?: unknown } | undefined)?.id;
+    const parsed = parseVisibility(change);
+    if (!parsed.ok) {
+      send(conn.socket, {
+        type: 'rejected',
+        id: typeof changeId === 'string' ? changeId : null,
+        error: parsed.error,
+      });
+      return;
+    }
+    const { id } = parsed.value;
+    if (conn.userId === null) {
+      send(conn.socket, { type: 'rejected', id, error: 'only the author can undo a stroke' });
+      return;
+    }
+
+    const result = await store.insertChange(conn.canvasId, conn.userId, parsed.value);
+    switch (result.status) {
+      case 'canvas-not-found':
+        send(conn.socket, { type: 'not-found' });
+        conn.socket.close(CLOSE_CANVAS_NOT_FOUND, 'Canvas not found');
+        return;
+      case 'id-taken':
+        send(conn.socket, { type: 'rejected', id, error: 'change id in use' });
+        return;
+      case 'stroke-not-found':
+        send(conn.socket, { type: 'rejected', id, error: 'stroke not found' });
+        return;
+      case 'not-author':
+        send(conn.socket, { type: 'rejected', id, error: 'only the author can undo a stroke' });
+        return;
+      case 'created':
+        broadcastSaved(conn, { type: 'visibility', change: { ...parsed.value, seq: result.seq } });
+        break;
+      case 'duplicate':
+        break;
+    }
+    send(conn.socket, { type: 'ack', id, seq: result.seq });
   }
 
   function parseMessage(conn: Connection, data: RawData, isBinary: boolean) {
@@ -227,6 +290,7 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
     socket: WebSocket,
     canvasId: string,
     profile: { name: string; color: string },
+    userId: string | null,
     since: number,
   ): Promise<void> {
     const conn: Connection = {
@@ -234,7 +298,9 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
       canvasId,
       alive: true,
       joined: false,
+      backlog: [],
       peer: { id: randomUUID(), ...profile, cursor: null },
+      userId,
       limiter: new RateLimiter(EPHEMERAL_RATE_PER_SECOND, EPHEMERAL_BURST),
     };
     connections.add(conn);
@@ -245,8 +311,8 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
     socket.on('close', () => leave(conn));
     socket.on('error', (err) => console.error(`WebSocket error on ${canvasId}:`, err.message));
 
-    // Strokes are handled one at a time, so a client's strokes are saved in
-    // the order it drew them. Ephemeral messages skip that queue: a cursor must
+    // Strokes and changes are handled one at a time, so a client's operations
+    // are saved in the order it made them: an undo never overtakes its stroke. Ephemeral messages skip that queue: a cursor must
     // not wait for a database write. A stroke's live points still reach others
     // before the stroke itself, which is only broadcast once saved.
     let queue = Promise.resolve();
@@ -257,12 +323,16 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
         handleEphemeral(conn, message);
         return;
       }
-      if (message.type !== 'stroke') {
+      if (message.type !== 'stroke' && message.type !== 'visibility') {
         send(socket, { type: 'rejected', id: null, error: 'unknown message type' });
         return;
       }
       queue = queue
-        .then(() => handleStroke(conn, message.stroke))
+        .then(() =>
+          message.type === 'stroke'
+            ? handleStroke(conn, message.stroke)
+            : handleChange(conn, message.change),
+        )
         .catch((err: unknown) => {
           console.error(`Message on ${canvasId} failed:`, err);
           // The client keeps unacknowledged strokes and resends them when it
@@ -280,15 +350,21 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
       }
       // Closed while waiting: `leave` already ran and would never run again.
       if (socket.readyState !== WebSocket.OPEN) return;
-      // Join before reading, so a stroke saved meanwhile is either in the
-      // snapshot or broadcast to us (maybe both; the client merges by id).
+      // Join before reading, so an operation saved meanwhile is either in the
+      // snapshot or in the backlog (maybe both; the client merges by id).
       join(conn);
       // Seqs only grow, so a client ahead of the canvas got them from
       // somewhere else (a restored database, a bug). Its strokes cannot be
       // trusted: it gets everything and replaces what it has.
       const from = since <= lastSeq ? since : 0;
-      const strokes = await store.listStrokes(canvasId, from);
-      send(socket, { type: 'snapshot', since: from, strokes });
+      const [strokes, changes] = await Promise.all([
+        store.listStrokes(canvasId, from),
+        store.listChanges(canvasId, from),
+      ]);
+      send(socket, { type: 'snapshot', since: from, strokes, changes });
+      const backlog = conn.backlog ?? [];
+      conn.backlog = null;
+      for (const message of backlog) send(socket, message);
     } catch (err) {
       console.error(`Joining ${canvasId} failed:`, err);
       socket.close(CLOSE_INTERNAL_ERROR, 'Internal error');
@@ -303,8 +379,14 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
       return;
     }
     const profile = parseProfile(searchParams);
+    const userId = parseUserId(searchParams.get('user'));
     const since = parseSince(searchParams.get('since'));
-    wss.handleUpgrade(req, socket, head, (ws) => void onConnection(ws, canvasId, profile, since));
+    wss.handleUpgrade(
+      req,
+      socket,
+      head,
+      (ws) => void onConnection(ws, canvasId, profile, userId, since),
+    );
   });
 
   const heartbeat = setInterval(() => {

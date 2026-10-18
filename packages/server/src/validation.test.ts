@@ -9,6 +9,8 @@ import {
   parseProfile,
   parseSince,
   parseStroke,
+  parseUserId,
+  parseVisibility,
 } from './validation.js';
 
 const valid = {
@@ -138,5 +140,44 @@ describe('parseSince', () => {
     for (const value of [null, '', '-1', '1.5', '1e3', 'abc', '9'.repeat(16)]) {
       assert.equal(parseSince(value), 0, String(value));
     }
+  });
+});
+
+describe('parseVisibility', () => {
+  const change = {
+    id: '3F1C2B7E-9A4D-4E8F-B123-0A1B2C3D4E5F',
+    strokeId: '00000000-0000-4000-8000-000000000001',
+    visible: false,
+  };
+
+  it('accepts a valid change and lowercases its ids', () => {
+    assert.deepEqual(parseVisibility({ ...change, extra: 1 }), {
+      ok: true,
+      value: { ...change, id: change.id.toLowerCase() },
+    });
+  });
+
+  it('rejects bad ids and non-boolean visibility', () => {
+    for (const input of [
+      null,
+      { ...change, id: 'x' },
+      { ...change, strokeId: 42 },
+      { ...change, visible: 'false' },
+    ]) {
+      assert.equal(parseVisibility(input).ok, false, JSON.stringify(input));
+    }
+  });
+});
+
+describe('parseUserId', () => {
+  it('reads a UUID, lowercased', () => {
+    assert.equal(
+      parseUserId('3F1C2B7E-9A4D-4E8F-B123-0A1B2C3D4E5F'),
+      '3f1c2b7e-9a4d-4e8f-b123-0a1b2c3d4e5f',
+    );
+  });
+
+  it('treats anything else as no user', () => {
+    for (const value of [null, '', 'alice', '3f1c2b7e']) assert.equal(parseUserId(value), null);
   });
 });

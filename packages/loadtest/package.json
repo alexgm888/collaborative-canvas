@@ -1,0 +1,20 @@
+{
+  "name": "@canvas/loadtest",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@canvas/shared": "*",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.19.2"
+  }
+}

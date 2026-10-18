@@ -76,10 +76,16 @@ export type ClientMessage =
   | { type: 'live'; stroke: Stroke }
   | { type: 'cursor'; position: Point | null };
 
+/** A cursor or new points of a stroke in progress, as relayed inside a `batch`. */
+export type EphemeralMessage =
+  | { type: 'cursor'; peerId: string; position: Point | null }
+  /** New points of a stroke a peer is drawing (see the client `live` message). */
+  | { type: 'live'; peerId: string; stroke: Stroke };
+
 /** Messages the server sends. */
 export type ServerMessage =
-  /** Sent as soon as you join the room: who else is here. */
-  | { type: 'welcome'; peers: Peer[] }
+  /** Sent as soon as you join the room: your own peer id and who else is here. */
+  | { type: 'welcome'; you: string; peers: Peer[] }
   /**
    * The saved strokes and visibility changes with a seq above `since`, each
    * list in order. Arrives after `welcome` and before any saved operation of
@@ -103,8 +109,12 @@ export type ServerMessage =
   | { type: 'peer-joined'; peer: Peer }
   /** The peer left; drop its cursor and the strokes it was drawing. */
   | { type: 'peer-left'; peerId: string }
-  | { type: 'cursor'; peerId: string; position: Point | null }
-  /** New points of a stroke a peer is drawing (see the client `live` message). */
-  | { type: 'live'; peerId: string; stroke: Stroke }
+  /**
+   * Cursors and strokes in progress of everyone in the room (yours included:
+   * skip them by `you`), gathered for up to 50 ms and sent as one message.
+   * Only the latest cursor of each peer is kept; live points are all there,
+   * in order. Anything else the server sends goes after the batch before it.
+   */
+  | { type: 'batch'; messages: EphemeralMessage[] }
   /** The peer's stroke in progress will never be saved; stop showing it. */
   | { type: 'live-cancel'; peerId: string; id: string };

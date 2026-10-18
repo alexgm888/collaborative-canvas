@@ -1,0 +1,114 @@
+{
+  "config": {
+    "url": "http://localhost:3001",
+    "clients": 50,
+    "rooms": 1,
+    "durationS": 60,
+    "rampS": 10,
+    "workers": 3,
+    "behavior": {
+      "cursorHz": 20,
+      "pauseMs": [1000, 3000],
+      "strokeMs": [500, 1500],
+      "undoRate": 0.1
+    }
+  },
+  "joinedClients": 50,
+  "seconds": 60,
+  "latencyMs": {
+    "join": {
+      "count": 50,
+      "mean": 12.3,
+      "p50": 9.2,
+      "p95": 26.4,
+      "p99": 68.4,
+      "max": 68.4
+    },
+    "strokeAck": {
+      "count": 475,
+      "mean": 65483.8,
+      "p50": 60000,
+      "p95": 60000,
+      "p99": 60000,
+      "max": 78903.8
+    },
+    "strokeToOthers": {
+      "count": 352,
+      "mean": 52794.7,
+      "p50": 52669.1,
+      "p95": 54853.6,
+      "p99": 54975.6,
+      "max": 54976
+    },
+    "undoAck": {
+      "count": 0,
+      "mean": 0,
+      "p50": 0,
+      "p95": 0,
+      "p99": 0,
+      "max": 0
+    },
+    "undoToOthers": {
+      "count": 0,
+      "mean": 0,
+      "p50": 0,
+      "p95": 0,
+      "p99": 0,
+      "max": 0
+    },
+    "cursorToOthers": {
+      "count": 385197,
+      "mean": 6103.3,
+      "p50": 6101.1,
+      "p95": 12155.3,
+      "p99": 14108.3,
+      "max": 26993.9
+    },
+    "liveToOthers": {
+      "count": 123329,
+      "mean": 6316.9,
+      "p50": 6338.1,
+      "p95": 12159.1,
+      "p99": 14317.8,
+      "max": 34488.2
+    },
+    "serverProbe": {
+      "count": 7,
+      "mean": 8581.4,
+      "p50": 10011.6,
+      "p95": 10016.7,
+      "p99": 10016.7,
+      "max": 10016.7
+    }
+  },
+  "throughput": {
+    "sentPerS": 1385,
+    "receivedPerS": 30660,
+    "kbOutPerS": 206.4,
+    "kbInPerS": 5999.5,
+    "sent": {
+      "cursor": 61765,
+      "live": 20339,
+      "stroke": 992
+    },
+    "received": {
+      "welcome": 50,
+      "snapshot": 50,
+      "peer-joined": 1225,
+      "cursor": 1376900,
+      "batch.cursor": 1376900,
+      "live": 437962,
+      "batch.live": 437962,
+      "stroke": 23297,
+      "ack": 475
+    }
+  },
+  "ephemeralDelivered": {
+    "cursor": 0.455,
+    "livePoints": 0.4395
+  },
+  "generatorThreadUtilization": [0.46, 0.47, 0.43],
+  "unexpectedCloses": 0,
+  "errors": {},
+  "consistency": ["687 operations never acked", "QEqIcxecXG0h: 50 of 50 clients differ"]
+}

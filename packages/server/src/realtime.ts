@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, Server } from 'node:http';
 import type { Duplex } from 'node:stream';
-import type { Peer, ServerMessage } from '@canvas/shared';
+import type { EphemeralMessage, Peer, Point, ServerMessage, Stroke } from '@canvas/shared';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { RawData } from 'ws';
 import type { StrokeStore } from './db/canvases.js';
@@ -41,6 +41,13 @@ const MAX_BUFFERED_EPHEMERAL_BYTES = 256 * 1024;
 // rest: a misbehaving client cannot make the server flood the room.
 const EPHEMERAL_RATE_PER_SECOND = 80;
 const EPHEMERAL_BURST = 160;
+
+// Relaying every cursor to everyone makes sends grow with the square of the
+// room: 50 people sending 27 messages per second is 66 000 sends per second,
+// which saturated the server in the load test. Instead, each room gathers its
+// cursors and live points and sends them as one message this often, the same
+// interval clients already throttle to.
+const EPHEMERAL_FLUSH_MS = 50;
 
 // Close codes. 4000-4999 are free for applications.
 const CLOSE_GOING_AWAY = 1001;
@@ -94,23 +101,28 @@ interface Connection {
   limiter: RateLimiter;
 }
 
-type Sender = (socket: WebSocket, message: ServerMessage) => void;
+/** Cursors and live points of a room waiting for the next batch. */
+interface PendingBatch {
+  /** Latest position of each peer that moved, by peer id. */
+  cursors: Map<string, Point | null>;
+  /** New points of each stroke in progress, by stroke id. */
+  live: Map<string, { peerId: string; stroke: Stroke }>;
+  timer: ReturnType<typeof setTimeout>;
+}
 
-const send: Sender = (socket, message) => {
+/** Sends an already serialized message, so a broadcast serializes once. */
+function sendData(socket: WebSocket, data: string): void {
   if (socket.readyState !== WebSocket.OPEN) return;
   if (socket.bufferedAmount > MAX_BUFFERED_BYTES) {
     socket.terminate();
     return;
   }
-  socket.send(JSON.stringify(message));
-};
+  socket.send(data);
+}
 
-/** Like `send`, but a message that would wait behind a backlog is dropped. */
-const sendEphemeral: Sender = (socket, message) => {
-  if (socket.readyState !== WebSocket.OPEN) return;
-  if (socket.bufferedAmount > MAX_BUFFERED_EPHEMERAL_BYTES) return;
-  socket.send(JSON.stringify(message));
-};
+function send(socket: WebSocket, message: ServerMessage): void {
+  sendData(socket, JSON.stringify(message));
+}
 
 function rejectUpgrade(socket: Duplex, status: string): void {
   socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
@@ -126,26 +138,75 @@ function rejectUpgrade(socket: Duplex, status: string): void {
  * Undo and redo are saved operations too (visibility changes), numbered in the
  * same seq, and only the author of a stroke can make them.
  *
- * Cursors and strokes in progress are ephemeral: they are relayed at once,
- * never saved, and dropped when a client sends too many or cannot keep up.
+ * Cursors and strokes in progress are ephemeral: never saved, gathered per
+ * room into one batch every 50 ms, and dropped when a client sends too many or
+ * cannot keep up.
  */
 export function attachRealtime(server: Server, store: StrokeStore): Realtime {
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
   const rooms = new Map<string, Set<Connection>>();
+  const batches = new Map<string, PendingBatch>();
   const connections = new Set<Connection>();
 
-  function broadcast(from: Connection, message: ServerMessage, sendTo: Sender = send): void {
+  function batchOf(canvasId: string): PendingBatch {
+    let batch = batches.get(canvasId);
+    if (!batch) {
+      batch = {
+        cursors: new Map(),
+        live: new Map(),
+        timer: setTimeout(() => flushBatch(canvasId), EPHEMERAL_FLUSH_MS),
+      };
+      batches.set(canvasId, batch);
+    }
+    return batch;
+  }
+
+  /**
+   * Sends the pending cursors and live points of a room to everyone in it,
+   * serialized once. The sender's own are included: excluding them would mean
+   * one serialization per person, and clients skip them by id.
+   */
+  function flushBatch(canvasId: string): void {
+    const batch = batches.get(canvasId);
+    if (!batch) return;
+    clearTimeout(batch.timer);
+    batches.delete(canvasId);
+
+    const messages: EphemeralMessage[] = [];
+    for (const { peerId, stroke } of batch.live.values()) {
+      messages.push({ type: 'live', peerId, stroke });
+    }
+    for (const [peerId, position] of batch.cursors) {
+      messages.push({ type: 'cursor', peerId, position });
+    }
+    const data = JSON.stringify({ type: 'batch', messages } satisfies ServerMessage);
+    for (const conn of rooms.get(canvasId) ?? []) {
+      const { socket } = conn;
+      // Stale before it arrives for a client with this much waiting.
+      if (socket.readyState !== WebSocket.OPEN) continue;
+      if (socket.bufferedAmount > MAX_BUFFERED_EPHEMERAL_BYTES) continue;
+      socket.send(data);
+    }
+  }
+
+  function broadcast(from: Connection, message: ServerMessage): void {
+    // Whatever was batched before this message is sent before it, so nobody
+    // gets live points of a stroke after its cancel.
+    flushBatch(from.canvasId);
+    const data = JSON.stringify(message);
     for (const other of rooms.get(from.canvasId) ?? []) {
-      if (other !== from) sendTo(other.socket, message);
+      if (other !== from) sendData(other.socket, data);
     }
   }
 
   /** Broadcasts a saved operation, holding it for whoever still waits for a snapshot. */
   function broadcastSaved(from: Connection, message: ServerMessage): void {
+    flushBatch(from.canvasId);
+    const data = JSON.stringify(message);
     for (const other of rooms.get(from.canvasId) ?? []) {
       if (other === from) continue;
       if (other.backlog) other.backlog.push(message);
-      else send(other.socket, message);
+      else sendData(other.socket, data);
     }
   }
 
@@ -157,7 +218,11 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
     }
     // Welcome and announce in the same tick as joining, so the newcomer knows
     // every peer before any message about one of them can reach it.
-    send(conn.socket, { type: 'welcome', peers: [...room].map((other) => other.peer) });
+    send(conn.socket, {
+      type: 'welcome',
+      you: conn.peer.id,
+      peers: [...room].map((other) => other.peer),
+    });
     broadcast(conn, { type: 'peer-joined', peer: conn.peer });
     room.add(conn);
     conn.joined = true;
@@ -167,11 +232,16 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
     connections.delete(conn);
     const room = rooms.get(conn.canvasId);
     if (!room?.delete(conn)) return;
-    if (room.size === 0) rooms.delete(conn.canvasId);
-    else broadcast(conn, { type: 'peer-left', peerId: conn.peer.id });
+    if (room.size === 0) {
+      rooms.delete(conn.canvasId);
+      clearTimeout(batches.get(conn.canvasId)?.timer);
+      batches.delete(conn.canvasId);
+    } else {
+      broadcast(conn, { type: 'peer-left', peerId: conn.peer.id });
+    }
   }
 
-  /** Relays a cursor or a stroke in progress. Invalid ones are dropped. */
+  /** Adds a cursor or a stroke in progress to the next batch. Invalid ones are dropped. */
   function handleEphemeral(conn: Connection, message: Record<string, unknown>): void {
     // Before joining nobody can see this peer; over the limit, the next
     // message carries the newer state anyway.
@@ -181,15 +251,18 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
       const position = parseCursor(message.position);
       if (!position.ok) return;
       conn.peer.cursor = position.value;
-      broadcast(
-        conn,
-        { type: 'cursor', peerId: conn.peer.id, position: position.value },
-        sendEphemeral,
-      );
+      // Only where it is now matters, not where it went in between.
+      batchOf(conn.canvasId).cursors.set(conn.peer.id, position.value);
     } else {
-      const stroke = parseStroke(message.stroke, MAX_POINTS_PER_LIVE_MESSAGE);
-      if (!stroke.ok) return;
-      broadcast(conn, { type: 'live', peerId: conn.peer.id, stroke: stroke.value }, sendEphemeral);
+      const parsed = parseStroke(message.stroke, MAX_POINTS_PER_LIVE_MESSAGE);
+      if (!parsed.ok) return;
+      const stroke = parsed.value;
+      const live = batchOf(conn.canvasId).live;
+      const pending = live.get(stroke.id);
+      // Every point counts: they are appended to what was drawn so far. An id
+      // already used by someone else is not this peer's to extend.
+      if (!pending) live.set(stroke.id, { peerId: conn.peer.id, stroke });
+      else if (pending.peerId === conn.peer.id) pending.stroke.points.push(...stroke.points);
     }
   }
 
@@ -406,6 +479,8 @@ export function attachRealtime(server: Server, store: StrokeStore): Realtime {
 
     close: async () => {
       clearInterval(heartbeat);
+      for (const batch of batches.values()) clearTimeout(batch.timer);
+      batches.clear();
       // 1001 tells clients to reconnect, which during a deploy lands them on
       // the new instance.
       for (const conn of connections) conn.socket.close(CLOSE_GOING_AWAY, 'Server shutting down');

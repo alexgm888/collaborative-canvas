@@ -234,7 +234,10 @@ describe('realtime', () => {
 
   it('sends who is here and the saved strokes on connect', async () => {
     const client = await connect('room-a');
-    assert.deepEqual(await client.next(), { type: 'welcome', peers: [] });
+    const welcome = await client.next();
+    assert.ok(welcome.type === 'welcome');
+    assert.deepEqual(welcome.peers, []);
+    assert.match(welcome.you, /^[0-9a-f-]{36}$/);
     assert.deepEqual(await client.next(), {
       type: 'snapshot',
       since: 0,
@@ -372,15 +375,19 @@ describe('realtime', () => {
     assert.deepEqual(await alice.next(), { type: 'peer-left', peerId: bobPeer?.id });
   });
 
-  it('relays cursors without saving them and tells newcomers where they are', async () => {
+  it('relays cursors in batches without saving them and tells newcomers where they are', async () => {
     const alice = await join('room-b');
     const bob = await join('room-b');
 
     alice.send({ type: 'cursor', position: { x: 5, y: 6 } });
-    const cursor = await bob.next();
-    assert.equal(cursor.type, 'cursor');
-    assert.deepEqual(cursor.type === 'cursor' && cursor.position, { x: 5, y: 6 });
-    assert.ok(await alice.isQuiet(), 'the sender does not get its own cursor back');
+    const batch = await bob.next();
+    assert.ok(batch.type === 'batch');
+    assert.deepEqual(
+      batch.messages.map((m) => m.type === 'cursor' && m.position),
+      [{ x: 5, y: 6 }],
+    );
+    const own = await alice.next();
+    assert.deepEqual(own, batch, 'everyone gets the same batch, the sender too');
 
     const carol = await connect('room-b');
     const welcome = await carol.next();
@@ -389,7 +396,45 @@ describe('realtime', () => {
 
     alice.send({ type: 'cursor', position: null });
     const hidden = await bob.next();
-    assert.deepEqual(hidden.type === 'cursor' && hidden.position, null);
+    assert.deepEqual(hidden.type === 'batch' && hidden.messages[0], {
+      type: 'cursor',
+      peerId: batch.messages[0]?.peerId,
+      position: null,
+    });
+  });
+
+  it('keeps only the latest cursor of each peer and every live point, in one batch', async () => {
+    const alice = await join('room-a');
+    const bob = await join('room-a');
+    const bobsWelcome = (await bob.drain(0)).length; // Nothing pending.
+    assert.equal(bobsWelcome, 0);
+
+    for (let x = 1; x <= 3; x++) alice.send({ type: 'cursor', position: { x, y: 0 } });
+    bob.send({ type: 'cursor', position: { x: 9, y: 9 } });
+    alice.send({ type: 'live', stroke: { ...stroke(2), points: [{ x: 1, y: 1 }] } });
+    alice.send({ type: 'live', stroke: { ...stroke(2), points: [{ x: 2, y: 2 }] } });
+
+    const batch = await bob.next();
+    assert.ok(batch.type === 'batch');
+    const live = batch.messages.filter((m) => m.type === 'live');
+    const cursors = batch.messages.filter((m) => m.type === 'cursor');
+    assert.deepEqual(
+      live.map((m) => m.type === 'live' && m.stroke.points),
+      [
+        [
+          { x: 1, y: 1 },
+          { x: 2, y: 2 },
+        ],
+      ],
+    );
+    assert.deepEqual(
+      cursors.map((m) => m.type === 'cursor' && m.position),
+      [
+        { x: 3, y: 0 },
+        { x: 9, y: 9 },
+      ],
+    );
+    assert.ok(await bob.isQuiet(80), 'one batch per interval');
   });
 
   it('relays strokes in progress without saving them', async () => {
@@ -397,9 +442,9 @@ describe('realtime', () => {
     const bob = await join('room-a');
 
     alice.send({ type: 'live', stroke: stroke(2) });
-    const live = await bob.next();
-    assert.equal(live.type, 'live');
-    assert.deepEqual(live.type === 'live' && live.stroke, stroke(2));
+    const batch = await bob.next();
+    assert.ok(batch.type === 'batch');
+    assert.deepEqual(batch.messages[0]?.type === 'live' && batch.messages[0].stroke, stroke(2));
     assert.deepEqual(store.canvases.get('room-a'), [saved(1, 1)]);
   });
 
@@ -418,30 +463,37 @@ describe('realtime', () => {
     const alice = await join('room-a');
     const bob = await join('room-a');
 
+    // No waiting in between: the batched live points must still arrive first.
     alice.send({ type: 'live', stroke: stroke(2) });
-    assert.equal((await bob.next()).type, 'live');
     alice.sendStroke({ ...stroke(2), width: 0 });
 
-    assert.equal((await alice.next()).type, 'rejected');
+    assert.equal((await bob.next()).type, 'batch');
     const cancel = await bob.next();
     assert.equal(cancel.type, 'live-cancel');
     assert.equal(cancel.type === 'live-cancel' && cancel.id, stroke(2).id);
+    assert.ok((await alice.drain()).some((m) => m.type === 'rejected'));
   });
 
   it('rate-limits ephemeral messages per connection', async () => {
     const alice = await join('room-b');
     const bob = await join('room-b');
 
+    // Live points are never merged away, so they show how many messages got in.
     const sent = 1000;
-    for (let i = 0; i < sent; i++) alice.send({ type: 'cursor', position: { x: i, y: i } });
+    for (let i = 0; i < sent; i++) {
+      alice.send({ type: 'live', stroke: { ...stroke(2), points: [{ x: i, y: i }] } });
+    }
 
-    const received = (await bob.drain(200)).filter((m) => m.type === 'cursor').length;
-    assert.ok(received > 0, 'some cursors get through');
-    assert.ok(received < sent / 2, `${received} of ${sent} cursors got through`);
+    const received = (await bob.drain(200))
+      .flatMap((m) => (m.type === 'batch' ? m.messages : []))
+      .reduce((n, m) => n + (m.type === 'live' ? m.stroke.points.length : 0), 0);
+    assert.ok(received > 0, 'some get through');
+    assert.ok(received < sent / 2, `${received} of ${sent} got through`);
 
     // Saved strokes are not limited.
     alice.sendStroke(stroke(3));
-    assert.deepEqual(await alice.next(), { type: 'ack', id: stroke(3).id, seq: 1 });
+    const acked = (await alice.drain(100)).find((m) => m.type === 'ack');
+    assert.deepEqual(acked, { type: 'ack', id: stroke(3).id, seq: 1 });
   });
 
   it('does not join a room when the client leaves before the canvas is checked', async () => {

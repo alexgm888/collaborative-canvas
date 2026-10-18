@@ -1,4 +1,11 @@
-import type { ClientMessage, Peer, Point, ServerMessage, Stroke } from '@canvas/shared';
+import type {
+  ClientMessage,
+  EphemeralMessage,
+  Peer,
+  Point,
+  ServerMessage,
+  Stroke,
+} from '@canvas/shared';
 import type { Identity } from './identity';
 import { StrokeLog } from './strokeLog';
 
@@ -89,6 +96,8 @@ export class CanvasConnection {
   private readonly redoStack: string[] = [];
   private readonly log = new StrokeLog();
   private readonly peers = new Map<string, Peer>();
+  /** This tab's peer id in the current connection, to skip its own cursor and live points. */
+  private self: string | null = null;
   /** Strokes in progress by id, with the peer drawing each one. */
   private readonly live = new Map<string, { peerId: string; stroke: Stroke }>();
   private socket: WebSocket | null = null;
@@ -211,11 +220,14 @@ export class CanvasConnection {
       // Presence is only known while connected; the next welcome rebuilds it.
       this.peers.clear();
       this.live.clear();
+      // Otherwise their cursors and strokes in progress would stay frozen on
+      // screen until the next welcome.
+      const gone = { ...this.peersPatch(), ...this.livePatch() };
       if (event.code === 4404) {
-        this.update({ status: 'not-found' });
+        this.update({ ...gone, status: 'not-found' });
         return;
       }
-      this.update({ status: 'offline' });
+      this.update({ ...gone, status: 'offline' });
       this.scheduleReconnect();
     };
     // Errors are always followed by a close event, which does the handling.
@@ -324,6 +336,7 @@ export class CanvasConnection {
         // The close event (4404) that follows sets the status.
         return;
       case 'welcome':
+        this.self = message.you;
         this.peers.clear();
         for (const peer of message.peers) this.peers.set(peer.id, peer);
         this.update(this.peersPatch());
@@ -337,25 +350,23 @@ export class CanvasConnection {
         this.dropLiveOf(message.peerId);
         this.update({ ...this.peersPatch(), ...this.livePatch() });
         return;
-      case 'cursor': {
-        const peer = this.peers.get(message.peerId);
-        if (!peer) return;
-        this.peers.set(peer.id, { ...peer, cursor: message.position });
-        this.update(this.peersPatch());
-        return;
-      }
-      case 'live': {
-        const { peerId, stroke } = message;
-        // Points that arrive after the final stroke would draw it twice.
-        if (!this.peers.has(peerId) || this.log.has(stroke.id)) return;
-        const entry = this.live.get(stroke.id);
-        if (entry && entry.peerId !== peerId) return;
-        const points = entry ? [...entry.stroke.points, ...stroke.points] : stroke.points;
-        this.live.set(stroke.id, {
-          peerId,
-          stroke: { ...stroke, points: points.slice(0, MAX_LIVE_POINTS) },
-        });
-        this.update(this.livePatch());
+      case 'batch': {
+        // Up to one cursor and stroke in progress per peer, in a single state
+        // update: one render for the whole batch, not one per peer.
+        let cursorsMoved = false;
+        let liveChanged = false;
+        for (const ephemeral of message.messages) {
+          // Own cursor and strokes are already on screen.
+          if (ephemeral.peerId === this.self || !this.applyEphemeral(ephemeral)) continue;
+          if (ephemeral.type === 'cursor') cursorsMoved = true;
+          else liveChanged = true;
+        }
+        if (cursorsMoved || liveChanged) {
+          this.update({
+            ...(cursorsMoved ? this.peersPatch() : {}),
+            ...(liveChanged ? this.livePatch() : {}),
+          });
+        }
         return;
       }
       case 'live-cancel':
@@ -364,6 +375,27 @@ export class CanvasConnection {
         this.update(this.livePatch());
         return;
     }
+  }
+
+  /** Applies a peer's cursor or new live points; false if it changes nothing. */
+  private applyEphemeral(message: EphemeralMessage): boolean {
+    if (message.type === 'cursor') {
+      const peer = this.peers.get(message.peerId);
+      if (!peer) return false;
+      this.peers.set(peer.id, { ...peer, cursor: message.position });
+      return true;
+    }
+    const { peerId, stroke } = message;
+    // Points that arrive after the final stroke would draw it twice.
+    if (!this.peers.has(peerId) || this.log.has(stroke.id)) return false;
+    const entry = this.live.get(stroke.id);
+    if (entry && entry.peerId !== peerId) return false;
+    const points = entry ? [...entry.stroke.points, ...stroke.points] : stroke.points;
+    this.live.set(stroke.id, {
+      peerId,
+      stroke: { ...stroke, points: points.slice(0, MAX_LIVE_POINTS) },
+    });
+    return true;
   }
 
   private update(patch: Partial<CanvasState>): void {

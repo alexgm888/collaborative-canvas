@@ -1,0 +1,115 @@
+{
+  "config": {
+    "url": "http://localhost:3001",
+    "clients": 50,
+    "rooms": 1,
+    "durationS": 60,
+    "rampS": 10,
+    "workers": 3,
+    "behavior": {
+      "cursorHz": 20,
+      "pauseMs": [1000, 3000],
+      "strokeMs": [500, 1500],
+      "undoRate": 0.1
+    }
+  },
+  "joinedClients": 50,
+  "seconds": 60,
+  "latencyMs": {
+    "join": {
+      "count": 50,
+      "mean": 18.3,
+      "p50": 19.6,
+      "p95": 29.7,
+      "p99": 58.6,
+      "max": 58.6
+    },
+    "strokeAck": {
+      "count": 947,
+      "mean": 24.4,
+      "p50": 19.5,
+      "p95": 53,
+      "p99": 65.4,
+      "max": 133.7
+    },
+    "strokeToOthers": {
+      "count": 14848,
+      "mean": 23.1,
+      "p50": 18.2,
+      "p95": 51.9,
+      "p99": 67.1,
+      "max": 133.7
+    },
+    "undoAck": {
+      "count": 98,
+      "mean": 12.7,
+      "p50": 11.6,
+      "p95": 24.6,
+      "p99": 35.1,
+      "max": 35.1
+    },
+    "undoToOthers": {
+      "count": 1539,
+      "mean": 11.2,
+      "p50": 10.1,
+      "p95": 23.3,
+      "p99": 32.2,
+      "max": 35
+    },
+    "cursorToOthers": {
+      "count": 780157,
+      "mean": 33.9,
+      "p50": 25.5,
+      "p95": 80.8,
+      "p99": 98.7,
+      "max": 145.8
+    },
+    "liveToOthers": {
+      "count": 258681,
+      "mean": 35,
+      "p50": 27.2,
+      "p95": 82.1,
+      "p99": 99.8,
+      "max": 145.6
+    },
+    "serverProbe": {
+      "count": 227,
+      "mean": 4.7,
+      "p50": 2.7,
+      "p95": 16.5,
+      "p99": 33.5,
+      "max": 44.3
+    }
+  },
+  "throughput": {
+    "sentPerS": 1143,
+    "receivedPerS": 2005,
+    "kbOutPerS": 170.7,
+    "kbInPerS": 11092.8,
+    "sent": {
+      "cursor": 50729,
+      "live": 16798,
+      "stroke": 947,
+      "visibility": 98
+    },
+    "received": {
+      "welcome": 50,
+      "snapshot": 50,
+      "peer-joined": 1225,
+      "batch": 66750,
+      "batch.cursor": 2437995,
+      "batch.live": 808598,
+      "stroke": 46403,
+      "ack": 1045,
+      "visibility": 4802
+    }
+  },
+  "ephemeralDelivered": {
+    "cursor": 0.9808,
+    "livePoints": 1
+  },
+  "generatorThreadUtilization": [0.33, 0.34, 0.32],
+  "unexpectedCloses": 0,
+  "errors": {},
+  "consistency": "ok"
+}

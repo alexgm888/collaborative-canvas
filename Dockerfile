@@ -6,6 +6,7 @@ COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages/client/package.json packages/client/
 COPY packages/server/package.json packages/server/
 COPY packages/shared/package.json packages/shared/
+COPY packages/loadtest/package.json packages/loadtest/
 RUN npm ci
 
 COPY packages ./packages

@@ -15,6 +15,7 @@
     "lint": "eslint .",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "loadtest": "npm start -w @canvas/loadtest --",
     "format": "prettier --write ."
   },
   "devDependencies": {

@@ -4,7 +4,7 @@ Real-time collaborative canvas built with React, TypeScript and WebSockets.
 
 **Demo:** https://collaborative-canvas-production-1837.up.railway.app
 
-> **Estado:** en desarrollo (semana 6 de 8). Cada lienzo tiene su propia URL (`/c/<id>`) y quien la abra dibuja en el mismo lienzo en tiempo real: se ven los trazos de los demás mientras los dibujan, sus cursores con nombre y quién está conectado. Cada trazo terminado se guarda en PostgreSQL con un número de secuencia propio del lienzo; si se corta la conexión, los pendientes se reenvían al volver y solo se descargan los trazos que faltan. Cada persona puede deshacer y rehacer sus propios trazos (Ctrl+Z, Ctrl+Shift+Z) sin tocar los de los demás.
+> **Estado:** en desarrollo (semana 7 de 8). Cada lienzo tiene su propia URL (`/c/<id>`) y quien la abra dibuja en el mismo lienzo en tiempo real: se ven los trazos de los demás mientras los dibujan, sus cursores con nombre y quién está conectado. Cada trazo terminado se guarda en PostgreSQL con un número de secuencia propio del lienzo; si se corta la conexión, los pendientes se reenvían al volver y solo se descargan los trazos que faltan. Cada persona puede deshacer y rehacer sus propios trazos (Ctrl+Z, Ctrl+Shift+Z) sin tocar los de los demás. Probado con 50 personas en el mismo lienzo (y 100, y 200 en diez lienzos) con un generador de carga propio: [resultados](docs/carga/README.md).
 
 ## Estructura
 
@@ -13,6 +13,8 @@ packages/
   client/   React + TypeScript + Vite (canvas)
   server/   Node.js + TypeScript (API, WebSockets, PostgreSQL y estáticos)
   shared/   Tipos compartidos entre cliente y servidor
+  loadtest/ Generador de carga: clientes WebSocket simulados
+docs/carga/     Resultados de las pruebas de carga
 DECISIONES.md   Registro de decisiones técnicas
 ```
 
@@ -64,25 +66,24 @@ Al abrir `/` se crea un lienzo nuevo y la URL pasa a `/c/<id>`; comparte esa URL
 
 El cliente abre un WebSocket en `/api/canvases/:id/ws?name=…&color=…&user=…&since=…` por lienzo; `name` y `color` son el seudónimo con el que le ven los demás, `user` es un UUID secreto de la pestaña que identifica sus trazos para poder deshacerlos y `since`, el último `seq` hasta el que tiene todas las operaciones (0 la primera vez). Los mensajes son JSON y sus tipos están en `packages/shared` (`ClientMessage` y `ServerMessage`):
 
-| Dirección          | Mensaje                                        | Cuándo                                                           |
-| ------------------ | ---------------------------------------------- | ---------------------------------------------------------------- |
-| servidor → cliente | `welcome { peers }`                            | Al entrar en la sala: quién más está y dónde tiene el cursor     |
-| servidor → cliente | `snapshot { since, strokes, changes }`         | Después: trazos y cambios con `seq` mayor que `since`, en orden  |
-| cliente → servidor | `stroke { stroke }`                            | Al terminar un trazo, y otra vez al reconectar si no hubo ack    |
-| cliente → servidor | `visibility { change }`                        | Deshacer (`visible: false`) o rehacer un trazo propio            |
-| servidor → cliente | `ack { id, seq }`                              | El trazo o el cambio está guardado con ese `seq`                 |
-| servidor → cliente | `stroke { stroke }`                            | Otro usuario del mismo lienzo terminó un trazo (con su `seq`)    |
-| servidor → cliente | `visibility { change }`                        | Otro usuario deshizo o rehízo uno de sus trazos (con su `seq`)   |
-| servidor → cliente | `rejected { id, error }`                       | El trazo o el cambio no es válido y no se guardará               |
-| servidor → cliente | `not-found` y cierre `4404`                    | El lienzo no existe                                              |
-| cliente → servidor | `live { stroke }`                              | Mientras se dibuja, hasta 20 por segundo, solo los puntos nuevos |
-| servidor → cliente | `live { peerId, stroke }`                      | Puntos nuevos del trazo que otro está dibujando (no guardados)   |
-| servidor → cliente | `live-cancel { peerId, id }`                   | Ese trazo en curso fue rechazado y no se guardará                |
-| cliente → servidor | `cursor { position }`                          | El puntero se mueve (hasta 20 por segundo) o sale (`null`)       |
-| servidor → cliente | `cursor { peerId, position }`                  | Otro movió el puntero                                            |
-| servidor → cliente | `peer-joined { peer }`, `peer-left { peerId }` | Alguien abre o cierra el lienzo                                  |
+| Dirección          | Mensaje                                        | Cuándo                                                               |
+| ------------------ | ---------------------------------------------- | -------------------------------------------------------------------- |
+| servidor → cliente | `welcome { you, peers }`                       | Al entrar en la sala: tu id y quién más está y dónde tiene el cursor |
+| servidor → cliente | `snapshot { since, strokes, changes }`         | Después: trazos y cambios con `seq` mayor que `since`, en orden      |
+| cliente → servidor | `stroke { stroke }`                            | Al terminar un trazo, y otra vez al reconectar si no hubo ack        |
+| cliente → servidor | `visibility { change }`                        | Deshacer (`visible: false`) o rehacer un trazo propio                |
+| servidor → cliente | `ack { id, seq }`                              | El trazo o el cambio está guardado con ese `seq`                     |
+| servidor → cliente | `stroke { stroke }`                            | Otro usuario del mismo lienzo terminó un trazo (con su `seq`)        |
+| servidor → cliente | `visibility { change }`                        | Otro usuario deshizo o rehízo uno de sus trazos (con su `seq`)       |
+| servidor → cliente | `rejected { id, error }`                       | El trazo o el cambio no es válido y no se guardará                   |
+| servidor → cliente | `not-found` y cierre `4404`                    | El lienzo no existe                                                  |
+| cliente → servidor | `live { stroke }`                              | Mientras se dibuja, hasta 20 por segundo, solo los puntos nuevos     |
+| servidor → cliente | `live-cancel { peerId, id }`                   | Ese trazo en curso fue rechazado y no se guardará                    |
+| cliente → servidor | `cursor { position }`                          | El puntero se mueve (hasta 20 por segundo) o sale (`null`)           |
+| servidor → cliente | `batch { messages }`                           | Cada 50 ms: último cursor de cada uno y puntos en vivo nuevos        |
+| servidor → cliente | `peer-joined { peer }`, `peer-left { peerId }` | Alguien abre o cierra el lienzo                                      |
 
-`live` y `cursor` son efímeros: no se guardan, no esperan a la base de datos y el servidor los descarta si un cliente envía demasiados o no da abasto para recibirlos (decisión 011).
+`live` y `cursor` son efímeros: no se guardan, no esperan a la base de datos y el servidor los descarta si un cliente envía demasiados o no da abasto para recibirlos (decisión 011). El servidor los agrupa por sala y manda un único `batch` cada 50 ms, igual para todos (cada cliente salta los suyos por `you`): reenviarlos uno a uno crecía con el cuadrado de la sala y lo tumbaba con 50 personas (decisión 015).
 
 Cada lienzo numera sus trazos guardados 1, 2, 3… sin huecos, y todos los clientes los dibujan en ese orden. Al reconectar, el cliente pide los posteriores al último número que tiene sin huecos, no al mayor que ha visto (decisión 012).
 
@@ -99,7 +100,16 @@ Sin `DATABASE_URL`, el servidor se conecta a la base de datos de `docker-compose
 | `npm run lint`      | ESLint sobre todo el repo                |
 | `npm run typecheck` | Comprobación de tipos en ambos paquetes  |
 | `npm test`          | Tests del servidor y del cliente         |
+| `npm run loadtest`  | Prueba de carga (`-- --help`)            |
 | `npm run format`    | Formatea el código con Prettier          |
+
+### Tests
+
+`npm test` ejecuta los tests unitarios y los del tiempo real con un almacén en memoria. Los que necesitan PostgreSQL (`*.db.test.ts`: el SQL de secuencias, deshacer y un recorrido REST + WebSocket completo) solo corren si se define `TEST_DATABASE_URL`; cada archivo trabaja en un esquema propio que borra al terminar, así que puede apuntar a la base de desarrollo (decisión 014). CI los ejecuta siempre con un PostgreSQL 17.
+
+```bash
+TEST_DATABASE_URL=postgres://canvas:canvas@localhost:5432/canvas npm test
+```
 
 ## Docker
 

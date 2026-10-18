@@ -1,4 +1,5 @@
-import type { ClientMessage, ServerMessage, Stroke } from '@canvas/shared';
+import type { ClientMessage, Peer, Point, ServerMessage, Stroke } from '@canvas/shared';
+import type { Identity } from './identity';
 
 export type ConnectionStatus = 'connecting' | 'online' | 'offline' | 'not-found';
 
@@ -11,15 +12,29 @@ export interface CanvasState {
   pending: number;
   /** Own strokes the server refused; they stay on screen but are not saved. */
   rejected: number;
+  /** Everyone else with the canvas open. Empty while offline. */
+  peers: Peer[];
+  /** Strokes others are drawing right now, not saved yet. */
+  live: Stroke[];
 }
 
 // Backoff between reconnection attempts; the last value repeats. Each delay
 // gets random jitter so clients dropped together do not return together.
 const RECONNECT_DELAYS_MS = [500, 1000, 2000, 5000, 10_000];
 
-function socketUrl(canvasId: string): string {
+// Pointer events fire 60-240 times per second. Cursors and strokes in
+// progress go out at most this often, carrying only the latest cursor and the
+// points drawn since the previous message.
+const EPHEMERAL_INTERVAL_MS = 50;
+
+// The server refuses saved strokes above this; showing more of a peer's stroke
+// in progress would only make it disappear when the final one is rejected.
+const MAX_LIVE_POINTS = 10_000;
+
+function socketUrl(canvasId: string, identity: Identity): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${window.location.host}/api/canvases/${encodeURIComponent(canvasId)}/ws`;
+  const query = new URLSearchParams({ name: identity.name, color: identity.color });
+  return `${protocol}//${window.location.host}/api/canvases/${encodeURIComponent(canvasId)}/ws?${query}`;
 }
 
 /**
@@ -31,6 +46,10 @@ function socketUrl(canvasId: string): string {
  * server ignores a stroke id it already has. On each connection the server
  * sends a full snapshot, which is merged by id with what is on screen, so
  * strokes drawn by others while offline appear after reconnecting.
+ *
+ * Cursors and strokes in progress are throttled and sent only while online;
+ * losing one is harmless because the next carries newer state, and the final
+ * stroke always replaces its live version.
  */
 export class CanvasConnection {
   private state: CanvasState = {
@@ -39,15 +58,33 @@ export class CanvasConnection {
     strokes: [],
     pending: 0,
     rejected: 0,
+    peers: [],
+    live: [],
   };
   private readonly listeners = new Set<() => void>();
   private readonly outbox = new Map<string, Stroke>();
+  /** Ids of every stroke on screen, to drop duplicates and late live points. */
+  private readonly strokeIds = new Set<string>();
+  private readonly peers = new Map<string, Peer>();
+  /** Strokes in progress by id, with the peer drawing each one. */
+  private readonly live = new Map<string, { peerId: string; stroke: Stroke }>();
   private socket: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private attempt = 0;
   private closed = false;
 
-  constructor(private readonly canvasId: string) {
+  // Outgoing ephemeral state, flushed by `flushEphemeral`.
+  private cursor: Point | null = null;
+  private cursorDirty = false;
+  private drawing: Stroke | null = null;
+  private drawingSent = 0;
+  private flushTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastFlush = 0;
+
+  constructor(
+    private readonly canvasId: string,
+    private readonly identity: Identity,
+  ) {
     this.connect();
   }
 
@@ -60,20 +97,43 @@ export class CanvasConnection {
 
   /** Draws a finished stroke locally and sends it as soon as possible. */
   addStroke(stroke: Stroke): void {
+    // Unsent live points are not needed: the final stroke has them all.
+    if (this.drawing?.id === stroke.id) this.drawing = null;
     this.outbox.set(stroke.id, stroke);
+    this.strokeIds.add(stroke.id);
     this.update({ strokes: [...this.state.strokes, stroke] });
     this.send({ type: 'stroke', stroke });
+  }
+
+  /**
+   * Shares the stroke being drawn. Call it with the same object every time
+   * points are added to it; only the new points are sent.
+   */
+  updateLiveStroke(stroke: Stroke): void {
+    if (this.drawing?.id !== stroke.id) {
+      this.drawing = stroke;
+      this.drawingSent = 0;
+    }
+    this.scheduleFlush();
+  }
+
+  /** Shares the pointer position, or null when it leaves the canvas. */
+  moveCursor(position: Point | null): void {
+    this.cursor = position;
+    this.cursorDirty = true;
+    this.scheduleFlush();
   }
 
   close(): void {
     this.closed = true;
     clearTimeout(this.reconnectTimer);
+    clearTimeout(this.flushTimer);
     this.socket?.close(1000);
     this.socket = null;
   }
 
   private connect(): void {
-    const socket = new WebSocket(socketUrl(this.canvasId));
+    const socket = new WebSocket(socketUrl(this.canvasId, this.identity));
     this.socket = socket;
     this.update({ status: 'connecting' });
 
@@ -86,6 +146,9 @@ export class CanvasConnection {
     socket.onclose = (event) => {
       if (this.socket !== socket || this.closed) return;
       this.socket = null;
+      // Presence is only known while connected; the next welcome rebuilds it.
+      this.peers.clear();
+      this.live.clear();
       if (event.code === 4404) {
         this.update({ status: 'not-found' });
         return;
@@ -108,6 +171,50 @@ export class CanvasConnection {
     if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(message));
   }
 
+  /**
+   * Throttle with leading and trailing edges: the first change after a quiet
+   * period goes out at once, later ones wait for the interval to end, and the
+   * last state is never lost.
+   */
+  private scheduleFlush(): void {
+    if (this.flushTimer !== undefined) return;
+    const wait = Math.max(0, this.lastFlush + EPHEMERAL_INTERVAL_MS - performance.now());
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = undefined;
+      this.flushEphemeral();
+    }, wait);
+  }
+
+  private flushEphemeral(): void {
+    this.lastFlush = performance.now();
+    if (this.cursorDirty) {
+      this.cursorDirty = false;
+      this.send({ type: 'cursor', position: this.cursor });
+    }
+    const drawing = this.drawing;
+    if (drawing && drawing.points.length > this.drawingSent) {
+      const points = drawing.points.slice(this.drawingSent, MAX_LIVE_POINTS);
+      this.drawingSent = drawing.points.length;
+      if (points.length > 0) {
+        this.send({ type: 'live', stroke: { ...drawing, points } });
+      }
+    }
+  }
+
+  private livePatch(): Partial<CanvasState> {
+    return { live: [...this.live.values()].map((entry) => entry.stroke) };
+  }
+
+  private peersPatch(): Partial<CanvasState> {
+    return { peers: [...this.peers.values()] };
+  }
+
+  private dropLiveOf(peerId: string): void {
+    for (const [id, entry] of this.live) {
+      if (entry.peerId === peerId) this.live.delete(id);
+    }
+  }
+
   private receive(message: ServerMessage): void {
     switch (message.type) {
       case 'snapshot': {
@@ -116,6 +223,7 @@ export class CanvasConnection {
         // not saved yet and strokes broadcast before the snapshot was read.
         const ids = new Set(message.strokes.map((s) => s.id));
         const localOnly = this.state.strokes.filter((s) => !ids.has(s.id));
+        for (const id of ids) this.strokeIds.add(id);
         this.update({
           status: 'online',
           loaded: true,
@@ -124,8 +232,11 @@ export class CanvasConnection {
         return;
       }
       case 'stroke':
-        if (this.state.strokes.some((s) => s.id === message.stroke.id)) return;
-        this.update({ strokes: [...this.state.strokes, message.stroke] });
+        if (this.strokeIds.has(message.stroke.id)) return;
+        this.strokeIds.add(message.stroke.id);
+        // Its live version goes away in the same update, so nothing flickers.
+        this.live.delete(message.stroke.id);
+        this.update({ strokes: [...this.state.strokes, message.stroke], ...this.livePatch() });
         return;
       case 'ack':
         this.outbox.delete(message.id);
@@ -139,6 +250,46 @@ export class CanvasConnection {
         return;
       case 'not-found':
         // The close event (4404) that follows sets the status.
+        return;
+      case 'welcome':
+        this.peers.clear();
+        for (const peer of message.peers) this.peers.set(peer.id, peer);
+        this.update(this.peersPatch());
+        return;
+      case 'peer-joined':
+        this.peers.set(message.peer.id, message.peer);
+        this.update(this.peersPatch());
+        return;
+      case 'peer-left':
+        this.peers.delete(message.peerId);
+        this.dropLiveOf(message.peerId);
+        this.update({ ...this.peersPatch(), ...this.livePatch() });
+        return;
+      case 'cursor': {
+        const peer = this.peers.get(message.peerId);
+        if (!peer) return;
+        this.peers.set(peer.id, { ...peer, cursor: message.position });
+        this.update(this.peersPatch());
+        return;
+      }
+      case 'live': {
+        const { peerId, stroke } = message;
+        // Points that arrive after the final stroke would draw it twice.
+        if (!this.peers.has(peerId) || this.strokeIds.has(stroke.id)) return;
+        const entry = this.live.get(stroke.id);
+        if (entry && entry.peerId !== peerId) return;
+        const points = entry ? [...entry.stroke.points, ...stroke.points] : stroke.points;
+        this.live.set(stroke.id, {
+          peerId,
+          stroke: { ...stroke, points: points.slice(0, MAX_LIVE_POINTS) },
+        });
+        this.update(this.livePatch());
+        return;
+      }
+      case 'live-cancel':
+        if (this.live.get(message.id)?.peerId !== message.peerId) return;
+        this.live.delete(message.id);
+        this.update(this.livePatch());
         return;
     }
   }

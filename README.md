@@ -4,7 +4,7 @@ Real-time collaborative canvas built with React, TypeScript and WebSockets.
 
 **Demo:** https://collaborative-canvas-production-1837.up.railway.app
 
-> **Estado:** en desarrollo (semana 3 de 8). Cada lienzo tiene su propia URL (`/c/<id>`) y quien la abra dibuja en el mismo lienzo en tiempo real: cada trazo terminado se guarda en PostgreSQL y llega al resto por WebSocket. Si se corta la conexión, los trazos pendientes se reenvían al volver. Trazos en vivo mientras se dibujan, cursores y presencia llegan en la semana 4.
+> **Estado:** en desarrollo (semana 4 de 8). Cada lienzo tiene su propia URL (`/c/<id>`) y quien la abra dibuja en el mismo lienzo en tiempo real: se ven los trazos de los demás mientras los dibujan, sus cursores con nombre y quién está conectado. Cada trazo terminado se guarda en PostgreSQL; si se corta la conexión, los pendientes se reenvían al volver. La reconexión sin descargar el lienzo entero llega en la semana 5.
 
 ## Estructura
 
@@ -62,16 +62,25 @@ Al abrir `/` se crea un lienzo nuevo y la URL pasa a `/c/<id>`; comparte esa URL
 
 ### Tiempo real
 
-El cliente abre un WebSocket en `/api/canvases/:id/ws` por lienzo. Los mensajes son JSON y sus tipos están en `packages/shared` (`ClientMessage` y `ServerMessage`):
+El cliente abre un WebSocket en `/api/canvases/:id/ws?name=…&color=…` por lienzo; `name` y `color` son el seudónimo con el que le ven los demás. Los mensajes son JSON y sus tipos están en `packages/shared` (`ClientMessage` y `ServerMessage`):
 
-| Dirección          | Mensaje                     | Cuándo                                                        |
-| ------------------ | --------------------------- | ------------------------------------------------------------- |
-| servidor → cliente | `snapshot { strokes }`      | Nada más conectar (y en cada reconexión): el lienzo completo  |
-| cliente → servidor | `stroke { stroke }`         | Al terminar un trazo, y otra vez al reconectar si no hubo ack |
-| servidor → cliente | `ack { id }`                | El trazo está guardado                                        |
-| servidor → cliente | `stroke { stroke }`         | Otro usuario del mismo lienzo terminó un trazo                |
-| servidor → cliente | `rejected { id, error }`    | El trazo no es válido y no se guardará                        |
-| servidor → cliente | `not-found` y cierre `4404` | El lienzo no existe                                           |
+| Dirección          | Mensaje                                        | Cuándo                                                           |
+| ------------------ | ---------------------------------------------- | ---------------------------------------------------------------- |
+| servidor → cliente | `welcome { peers }`                            | Al entrar en la sala: quién más está y dónde tiene el cursor     |
+| servidor → cliente | `snapshot { strokes }`                         | Después (y en cada reconexión): el lienzo completo               |
+| cliente → servidor | `stroke { stroke }`                            | Al terminar un trazo, y otra vez al reconectar si no hubo ack    |
+| servidor → cliente | `ack { id }`                                   | El trazo está guardado                                           |
+| servidor → cliente | `stroke { stroke }`                            | Otro usuario del mismo lienzo terminó un trazo                   |
+| servidor → cliente | `rejected { id, error }`                       | El trazo no es válido y no se guardará                           |
+| servidor → cliente | `not-found` y cierre `4404`                    | El lienzo no existe                                              |
+| cliente → servidor | `live { stroke }`                              | Mientras se dibuja, hasta 20 por segundo, solo los puntos nuevos |
+| servidor → cliente | `live { peerId, stroke }`                      | Puntos nuevos del trazo que otro está dibujando (no guardados)   |
+| servidor → cliente | `live-cancel { peerId, id }`                   | Ese trazo en curso fue rechazado y no se guardará                |
+| cliente → servidor | `cursor { position }`                          | El puntero se mueve (hasta 20 por segundo) o sale (`null`)       |
+| servidor → cliente | `cursor { peerId, position }`                  | Otro movió el puntero                                            |
+| servidor → cliente | `peer-joined { peer }`, `peer-left { peerId }` | Alguien abre o cierra el lienzo                                  |
+
+`live` y `cursor` son efímeros: no se guardan, no esperan a la base de datos y el servidor los descarta si un cliente envía demasiados o no da abasto para recibirlos (decisión 011).
 
 Sin `DATABASE_URL`, el servidor se conecta a la base de datos de `docker-compose.yml`. Para usar otra, define `DATABASE_URL` (por ejemplo `postgres://usuario:clave@host:5432/bd`). Las migraciones se aplican solas al arrancar.
 

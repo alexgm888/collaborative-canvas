@@ -32,6 +32,36 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX strokes_canvas_id_seq_idx ON strokes (canvas_id, seq);
     `,
   },
+  {
+    // The global identity has gaps (a failed or duplicate insert burns a
+    // value) and is shared by every canvas, so it cannot tell a client which
+    // strokes it missed. Each canvas now numbers its own strokes 1, 2, 3…
+    id: '002_seq_per_canvas',
+    sql: `
+      ALTER TABLE strokes RENAME COLUMN seq TO row_id;
+      DROP INDEX strokes_canvas_id_seq_idx;
+
+      ALTER TABLE canvases ADD COLUMN last_seq bigint NOT NULL DEFAULT 0;
+      ALTER TABLE strokes ADD COLUMN seq bigint;
+
+      UPDATE strokes s
+      SET seq = numbered.seq
+      FROM (
+        SELECT row_id, row_number() OVER (PARTITION BY canvas_id ORDER BY row_id) AS seq
+        FROM strokes
+      ) numbered
+      WHERE s.row_id = numbered.row_id;
+
+      UPDATE canvases c
+      SET last_seq = counts.last_seq
+      FROM (SELECT canvas_id, max(seq) AS last_seq FROM strokes GROUP BY canvas_id) counts
+      WHERE c.id = counts.canvas_id;
+
+      ALTER TABLE strokes ALTER COLUMN seq SET NOT NULL;
+      -- Also the index that loading a canvas from a given seq uses.
+      ALTER TABLE strokes ADD CONSTRAINT strokes_canvas_id_seq_key UNIQUE (canvas_id, seq);
+    `,
+  },
 ];
 
 // Arbitrary constant shared by every instance of the server. Holding this

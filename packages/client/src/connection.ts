@@ -1,5 +1,6 @@
 import type { ClientMessage, Peer, Point, ServerMessage, Stroke } from '@canvas/shared';
 import type { Identity } from './identity';
+import { StrokeLog } from './strokeLog';
 
 export type ConnectionStatus = 'connecting' | 'online' | 'offline' | 'not-found';
 
@@ -31,9 +32,13 @@ const EPHEMERAL_INTERVAL_MS = 50;
 // in progress would only make it disappear when the final one is rejected.
 const MAX_LIVE_POINTS = 10_000;
 
-function socketUrl(canvasId: string, identity: Identity): string {
+function socketUrl(canvasId: string, identity: Identity, since: number): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const query = new URLSearchParams({ name: identity.name, color: identity.color });
+  const query = new URLSearchParams({
+    name: identity.name,
+    color: identity.color,
+    since: String(since),
+  });
   return `${protocol}//${window.location.host}/api/canvases/${encodeURIComponent(canvasId)}/ws?${query}`;
 }
 
@@ -43,9 +48,9 @@ function socketUrl(canvasId: string, identity: Identity): string {
  *
  * Own strokes are drawn at once and kept in an outbox until the server acks
  * them; every (re)connection resends the outbox. That is safe because the
- * server ignores a stroke id it already has. On each connection the server
- * sends a full snapshot, which is merged by id with what is on screen, so
- * strokes drawn by others while offline appear after reconnecting.
+ * server ignores a stroke id it already has. Each reconnection asks for the
+ * strokes after the last seq this client has without gaps, so strokes drawn
+ * by others while offline appear without downloading the whole canvas again.
  *
  * Cursors and strokes in progress are throttled and sent only while online;
  * losing one is harmless because the next carries newer state, and the final
@@ -63,8 +68,7 @@ export class CanvasConnection {
   };
   private readonly listeners = new Set<() => void>();
   private readonly outbox = new Map<string, Stroke>();
-  /** Ids of every stroke on screen, to drop duplicates and late live points. */
-  private readonly strokeIds = new Set<string>();
+  private readonly log = new StrokeLog();
   private readonly peers = new Map<string, Peer>();
   /** Strokes in progress by id, with the peer drawing each one. */
   private readonly live = new Map<string, { peerId: string; stroke: Stroke }>();
@@ -100,8 +104,8 @@ export class CanvasConnection {
     // Unsent live points are not needed: the final stroke has them all.
     if (this.drawing?.id === stroke.id) this.drawing = null;
     this.outbox.set(stroke.id, stroke);
-    this.strokeIds.add(stroke.id);
-    this.update({ strokes: [...this.state.strokes, stroke] });
+    this.log.addLocal(stroke);
+    this.update({ strokes: this.log.all() });
     this.send({ type: 'stroke', stroke });
   }
 
@@ -133,7 +137,7 @@ export class CanvasConnection {
   }
 
   private connect(): void {
-    const socket = new WebSocket(socketUrl(this.canvasId, this.identity));
+    const socket = new WebSocket(socketUrl(this.canvasId, this.identity, this.log.lastSeq));
     this.socket = socket;
     this.update({ status: 'connecting' });
 
@@ -217,30 +221,26 @@ export class CanvasConnection {
 
   private receive(message: ServerMessage): void {
     switch (message.type) {
-      case 'snapshot': {
+      case 'snapshot':
         this.attempt = 0;
-        // Server order first, then whatever is only known here: own strokes
-        // not saved yet and strokes broadcast before the snapshot was read.
-        const ids = new Set(message.strokes.map((s) => s.id));
-        const localOnly = this.state.strokes.filter((s) => !ids.has(s.id));
-        for (const id of ids) this.strokeIds.add(id);
-        this.update({
-          status: 'online',
-          loaded: true,
-          strokes: [...message.strokes, ...localOnly],
-        });
+        // Strokes broadcast before the snapshot was read may be in both; the
+        // log keeps one of each.
+        this.log.applySnapshot(message.since, message.strokes);
+        // An own stroke saved before the connection dropped, whose ack never
+        // arrived. The resent copy will be acked anyway.
+        for (const stroke of message.strokes) this.outbox.delete(stroke.id);
+        this.update({ status: 'online', loaded: true, strokes: this.log.all() });
         return;
-      }
       case 'stroke':
-        if (this.strokeIds.has(message.stroke.id)) return;
-        this.strokeIds.add(message.stroke.id);
+        if (!this.log.addSaved(message.stroke)) return;
         // Its live version goes away in the same update, so nothing flickers.
         this.live.delete(message.stroke.id);
-        this.update({ strokes: [...this.state.strokes, message.stroke], ...this.livePatch() });
+        this.update({ strokes: this.log.all(), ...this.livePatch() });
         return;
       case 'ack':
         this.outbox.delete(message.id);
-        this.update({});
+        this.log.confirm(message.id, message.seq);
+        this.update({ strokes: this.log.all() });
         return;
       case 'rejected':
         console.error('Stroke rejected by the server:', message.error);
@@ -275,7 +275,7 @@ export class CanvasConnection {
       case 'live': {
         const { peerId, stroke } = message;
         // Points that arrive after the final stroke would draw it twice.
-        if (!this.peers.has(peerId) || this.strokeIds.has(stroke.id)) return;
+        if (!this.peers.has(peerId) || this.log.has(stroke.id)) return;
         const entry = this.live.get(stroke.id);
         if (entry && entry.peerId !== peerId) return;
         const points = entry ? [...entry.stroke.points, ...stroke.points] : stroke.points;

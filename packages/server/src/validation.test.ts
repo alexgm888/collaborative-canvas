@@ -7,6 +7,7 @@ import {
   isCanvasId,
   parseCursor,
   parseProfile,
+  parseSince,
   parseStroke,
 } from './validation.js';
 
@@ -124,5 +125,18 @@ describe('parseProfile', () => {
     assert.equal(profile('name=a%0Ab%E2%80%AEc%20%20%20d').name, 'abc d');
     const long = profile(`name=${'🦦'.repeat(MAX_NAME_LENGTH + 5)}`).name;
     assert.equal([...long].length, MAX_NAME_LENGTH);
+  });
+});
+
+describe('parseSince', () => {
+  it('reads a non-negative integer', () => {
+    assert.equal(parseSince('0'), 0);
+    assert.equal(parseSince('42'), 42);
+  });
+
+  it('treats anything else as no seq at all', () => {
+    for (const value of [null, '', '-1', '1.5', '1e3', 'abc', '9'.repeat(16)]) {
+      assert.equal(parseSince(value), 0, String(value));
+    }
   });
 });

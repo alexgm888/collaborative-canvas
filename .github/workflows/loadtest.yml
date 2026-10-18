@@ -1,0 +1,58 @@
+name: Load test
+
+# Launched by hand from the Actions tab (or `gh workflow run loadtest.yml`).
+# It runs the generator on a GitHub machine, whose bandwidth a home
+# connection cannot match: 50 people in one canvas receive ~11 MB/s.
+# It draws on the target server for real, so never on a schedule.
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: Server to test
+        default: https://collaborative-canvas-production-1837.up.railway.app
+      clients:
+        description: Simulated people
+        default: '50'
+      rooms:
+        description: Canvases they are spread over
+        default: '1'
+      duration:
+        description: Seconds of activity
+        default: '60'
+
+# One load test at a time: two would measure each other.
+concurrency: loadtest
+
+jobs:
+  loadtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run the load test
+        # Inputs go through the environment, never pasted into the script,
+        # so a value cannot inject shell commands.
+        env:
+          URL: ${{ inputs.url }}
+          CLIENTS: ${{ inputs.clients }}
+          ROOMS: ${{ inputs.rooms }}
+          DURATION: ${{ inputs.duration }}
+        run: >-
+          npm run loadtest --
+          --url "$URL" --clients "$CLIENTS" --rooms "$ROOMS" --duration "$DURATION"
+          --out loadtest-results.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loadtest-results
+          path: loadtest-results.json
+          if-no-files-found: ignore

@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { handleApi, sendJson } from './api.js';
 import { migrate } from './db/migrate.js';
 import { createPool } from './db/pool.js';
+import { createStrokeStore } from './db/canvases.js';
+import { attachRealtime } from './realtime.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
 
@@ -76,6 +78,8 @@ const server = createServer((req, res) => {
   void serveStatic(req, res);
 });
 
+const realtime = attachRealtime(server, createStrokeStore(pool));
+
 // Apply pending migrations before accepting traffic, so no request ever sees
 // an outdated schema. If the database is unreachable the process exits and the
 // platform restarts it.
@@ -92,9 +96,11 @@ server.listen(PORT, () => {
 });
 
 function shutdown(): void {
+  // Open WebSockets would keep server.close() waiting forever.
   server.close(() => {
     void pool.end().finally(() => process.exit(0));
   });
+  void realtime.close();
 }
 
 process.on('SIGTERM', shutdown);

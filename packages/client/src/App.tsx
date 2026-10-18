@@ -1,15 +1,13 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import type { Stroke } from '@canvas/shared';
-import { HttpError, createCanvas, loadCanvas, saveStroke } from './api';
+import { createCanvas } from './api';
 import { Canvas } from './Canvas';
+import { CanvasConnection } from './connection';
+import type { CanvasState } from './connection';
 
 const COLORS = ['#111827', '#dc2626', '#2563eb', '#16a34a', '#f59e0b'];
 
-type Board =
-  | { status: 'loading' }
-  | { status: 'ready'; id: string; strokes: Stroke[] }
-  | { status: 'not-found' }
-  | { status: 'error' };
+type BoardId = { status: 'loading' } | { status: 'ready'; id: string } | { status: 'error' };
 
 function canvasIdFromPath(pathname: string): string | null {
   const match = /^\/c\/([^/]+)\/?$/.exec(pathname);
@@ -20,67 +18,82 @@ function canvasIdFromPath(pathname: string): string | null {
 // not create two canvases.
 let pendingCreate: Promise<string> | null = null;
 
-/** Resolves the canvas for the current URL: `/c/:id` loads it, `/` creates one. */
-function useBoard(): Board {
-  const [board, setBoard] = useState<Board>({ status: 'loading' });
+/** The canvas id for the current URL: `/c/:id` uses it, `/` creates a canvas. */
+function useBoardId(): BoardId {
+  const [board, setBoard] = useState<BoardId>(() => {
+    const id = canvasIdFromPath(window.location.pathname);
+    return id ? { status: 'ready', id } : { status: 'loading' };
+  });
 
   useEffect(() => {
+    if (board.status !== 'loading') return;
     let cancelled = false;
 
-    async function resolve(): Promise<void> {
-      let id = canvasIdFromPath(window.location.pathname);
-      if (!id) {
-        pendingCreate ??= createCanvas();
-        id = await pendingCreate;
+    pendingCreate ??= createCanvas();
+    pendingCreate
+      .then((id) => {
         // Replace rather than push, so Back does not land on `/` and create another.
         window.history.replaceState(null, '', `/c/${encodeURIComponent(id)}`);
-      }
-      const { strokes } = await loadCanvas(id);
-      if (!cancelled) setBoard({ status: 'ready', id, strokes });
-    }
-
-    resolve().catch((err: unknown) => {
-      if (cancelled) return;
-      console.error(err);
-      setBoard({ status: err instanceof HttpError && err.status === 404 ? 'not-found' : 'error' });
-    });
+        if (!cancelled) setBoard({ status: 'ready', id });
+      })
+      .catch((err: unknown) => {
+        console.error(err);
+        if (!cancelled) setBoard({ status: 'error' });
+      });
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [board.status]);
 
   return board;
 }
 
-type SaveState = { pending: number; failed: boolean };
+const IDLE_CONNECTION = {
+  getState: (): CanvasState | null => null,
+  subscribe: () => () => {},
+};
 
-function saveLabel({ pending, failed }: SaveState): string {
-  if (failed) return 'No se pudieron guardar algunos trazos';
+/** Opens a live connection to the canvas while it is shown. */
+function useCanvasConnection(id: string | null): {
+  state: CanvasState | null;
+  addStroke: (stroke: Stroke) => void;
+} {
+  const [connection, setConnection] = useState<CanvasConnection | null>(null);
+
+  useEffect(() => {
+    if (!id) return;
+    const conn = new CanvasConnection(id);
+    setConnection(conn);
+    return () => {
+      conn.close();
+      setConnection(null);
+    };
+  }, [id]);
+
+  const source = connection ?? IDLE_CONNECTION;
+  const state = useSyncExternalStore(source.subscribe, source.getState);
+  const addStroke = useCallback((stroke: Stroke) => connection?.addStroke(stroke), [connection]);
+  return { state, addStroke };
+}
+
+function syncLabel({ status, pending, rejected }: CanvasState): string {
+  if (rejected > 0) return 'No se pudieron guardar algunos trazos';
+  if (status !== 'online') {
+    return pending > 0 ? `Sin conexión · ${pending} sin guardar` : 'Sin conexión · reconectando…';
+  }
   return pending > 0 ? 'Guardando…' : 'Guardado';
 }
 
 export function App() {
   const [color, setColor] = useState(COLORS[0] ?? '#111827');
   const [width, setWidth] = useState(4);
-  const board = useBoard();
-  const [save, setSave] = useState<SaveState>({ pending: 0, failed: false });
+  const board = useBoardId();
+  const { state, addStroke } = useCanvasConnection(board.status === 'ready' ? board.id : null);
 
-  const boardId = board.status === 'ready' ? board.id : null;
-
-  const onStrokeEnd = useCallback(
-    (stroke: Stroke) => {
-      if (!boardId) return;
-      setSave((s) => ({ ...s, pending: s.pending + 1 }));
-      saveStroke(boardId, stroke)
-        .then(() => setSave((s) => ({ ...s, pending: s.pending - 1 })))
-        .catch((err: unknown) => {
-          console.error(err);
-          setSave((s) => ({ pending: s.pending - 1, failed: true }));
-        });
-    },
-    [boardId],
-  );
+  const loaded = state?.loaded === true;
+  const notFound = state?.status === 'not-found';
+  const syncFailed = state !== null && (state.rejected > 0 || state.status !== 'online');
 
   return (
     <div className="app">
@@ -109,9 +122,9 @@ export function App() {
           </label>
         </div>
         <div className="meta">
-          {board.status === 'ready' && (
-            <span className={save.failed ? 'save-state failed' : 'save-state'} role="status">
-              {saveLabel(save)}
+          {state && loaded && !notFound && (
+            <span className={syncFailed ? 'save-state failed' : 'save-state'} role="status">
+              {syncLabel(state)}
             </span>
           )}
           {/* A full page load on purpose: `/` creates a fresh canvas. */}
@@ -119,24 +132,28 @@ export function App() {
         </div>
       </header>
       <main className="board">
-        {board.status === 'ready' && (
+        {board.status === 'ready' && state && loaded && !notFound && (
           <Canvas
             key={board.id}
             color={color}
             width={width}
-            initialStrokes={board.strokes}
-            onStrokeEnd={onStrokeEnd}
+            strokes={state.strokes}
+            onStrokeEnd={addStroke}
           />
         )}
-        {board.status === 'loading' && <p className="notice">Cargando lienzo…</p>}
-        {board.status === 'not-found' && (
+        {board.status !== 'error' && !loaded && !notFound && (
+          <p className="notice">
+            {state?.status === 'offline' ? 'Sin conexión, reintentando…' : 'Cargando lienzo…'}
+          </p>
+        )}
+        {notFound && (
           <p className="notice">
             Este lienzo no existe. <a href="/">Crear uno nuevo</a>
           </p>
         )}
         {board.status === 'error' && (
           <p className="notice">
-            No se pudo cargar el lienzo. Comprueba la conexión y recarga la página.
+            No se pudo crear el lienzo. Comprueba la conexión y recarga la página.
           </p>
         )}
       </main>

@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import type { Point, Stroke } from '@canvas/shared';
 
 interface CanvasProps {
   color: string;
   width: number;
-  /** Strokes already saved for this canvas. Only read on mount. */
-  initialStrokes: Stroke[];
-  /** Called once per finished stroke, e.g. to save it. */
+  /** Every stroke to show, own and remote. The stroke being drawn is not included. */
+  strokes: Stroke[];
+  /** Called once per finished stroke; the parent adds it to `strokes`. */
   onStrokeEnd: (stroke: Stroke) => void;
 }
 
@@ -35,19 +35,26 @@ function drawStroke(ctx: CanvasRenderingContext2D, stroke: Stroke): void {
   ctx.stroke();
 }
 
-export function Canvas({ color, width, initialStrokes, onStrokeEnd }: CanvasProps) {
+export function Canvas({ color, width, strokes, onStrokeEnd }: CanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [strokes, setStrokes] = useState<Stroke[]>(initialStrokes);
   const currentRef = useRef<Stroke | null>(null);
+  // Read by the resize observer and pointer handlers without re-subscribing.
+  const strokesRef = useRef(strokes);
 
-  const redraw = useCallback((all: Stroke[], current: Stroke | null) => {
+  const redraw = useCallback(() => {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext('2d');
     if (!canvas || !ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    for (const s of all) drawStroke(ctx, s);
-    if (current) drawStroke(ctx, current);
+    for (const s of strokesRef.current) drawStroke(ctx, s);
+    // The stroke in progress stays on top of strokes arriving from others.
+    if (currentRef.current) drawStroke(ctx, currentRef.current);
   }, []);
+
+  useEffect(() => {
+    strokesRef.current = strokes;
+    redraw();
+  }, [strokes, redraw]);
 
   // Keep the canvas bitmap in sync with its CSS size (and the device pixel ratio).
   useEffect(() => {
@@ -61,14 +68,14 @@ export function Canvas({ color, width, initialStrokes, onStrokeEnd }: CanvasProp
       canvas.height = Math.round(h * dpr);
       // Resizing resets the context; scale it so strokes keep using CSS pixels.
       canvas.getContext('2d')?.setTransform(dpr, 0, 0, dpr, 0, 0);
-      redraw(strokes, currentRef.current);
+      redraw();
     };
 
     resize();
     const observer = new ResizeObserver(resize);
     observer.observe(canvas);
     return () => observer.disconnect();
-  }, [redraw, strokes]);
+  }, [redraw]);
 
   const toPoint = (e: ReactPointerEvent<HTMLCanvasElement>): Point => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -83,21 +90,20 @@ export function Canvas({ color, width, initialStrokes, onStrokeEnd }: CanvasProp
       width,
       points: [toPoint(e)],
     };
-    redraw(strokes, currentRef.current);
+    redraw();
   };
 
   const onPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     const current = currentRef.current;
     if (!current) return;
     current.points.push(toPoint(e));
-    redraw(strokes, current);
+    redraw();
   };
 
   const finishStroke = () => {
     const current = currentRef.current;
     if (!current) return;
     currentRef.current = null;
-    setStrokes((prev) => [...prev, current]);
     onStrokeEnd(current);
   };
 

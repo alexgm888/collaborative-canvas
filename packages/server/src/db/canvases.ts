@@ -26,21 +26,48 @@ export async function listStrokes(db: Queryable, canvasId: string): Promise<Stro
   return rows;
 }
 
+// PostgreSQL error code for a foreign key violation.
+const FOREIGN_KEY_VIOLATION = '23503';
+
+export type InsertResult = 'created' | 'duplicate' | 'canvas-not-found';
+
 /**
- * Saves a stroke. Returns false if a stroke with the same id already exists,
- * which makes retries after a lost response harmless.
+ * Saves a stroke. A stroke whose id already exists is a 'duplicate', which
+ * makes retries after a lost response harmless.
  */
 export async function insertStroke(
   db: Queryable,
   canvasId: string,
   stroke: Stroke,
-): Promise<boolean> {
-  const { rowCount } = await db.query(
-    `INSERT INTO strokes (id, canvas_id, color, width, points)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (id) DO NOTHING`,
-    // node-postgres would turn a JS array into a PostgreSQL array, not JSON.
-    [stroke.id, canvasId, stroke.color, stroke.width, JSON.stringify(stroke.points)],
-  );
-  return rowCount === 1;
+): Promise<InsertResult> {
+  try {
+    const { rowCount } = await db.query(
+      `INSERT INTO strokes (id, canvas_id, color, width, points)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (id) DO NOTHING`,
+      // node-postgres would turn a JS array into a PostgreSQL array, not JSON.
+      [stroke.id, canvasId, stroke.color, stroke.width, JSON.stringify(stroke.points)],
+    );
+    return rowCount === 1 ? 'created' : 'duplicate';
+  } catch (err) {
+    // Checking the canvas first would cost a query on every stroke; the
+    // foreign key already enforces it.
+    if ((err as { code?: string }).code === FOREIGN_KEY_VIOLATION) return 'canvas-not-found';
+    throw err;
+  }
+}
+
+/** What the real-time layer needs from the database, so tests can swap it. */
+export interface StrokeStore {
+  canvasExists(canvasId: string): Promise<boolean>;
+  listStrokes(canvasId: string): Promise<Stroke[]>;
+  insertStroke(canvasId: string, stroke: Stroke): Promise<InsertResult>;
+}
+
+export function createStrokeStore(db: Queryable): StrokeStore {
+  return {
+    canvasExists: (canvasId) => canvasExists(db, canvasId),
+    listStrokes: (canvasId) => listStrokes(db, canvasId),
+    insertStroke: (canvasId, stroke) => insertStroke(db, canvasId, stroke),
+  };
 }

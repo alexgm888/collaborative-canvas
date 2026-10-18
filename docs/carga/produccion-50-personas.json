@@ -1,0 +1,115 @@
+{
+  "config": {
+    "url": "https://collaborative-canvas-production-1837.up.railway.app",
+    "clients": 50,
+    "rooms": 1,
+    "durationS": 60,
+    "rampS": 10,
+    "workers": 3,
+    "behavior": {
+      "cursorHz": 20,
+      "pauseMs": [1000, 3000],
+      "strokeMs": [500, 1500],
+      "undoRate": 0.1
+    }
+  },
+  "joinedClients": 50,
+  "seconds": 60,
+  "latencyMs": {
+    "join": {
+      "count": 50,
+      "mean": 112.5,
+      "p50": 110.6,
+      "p95": 133.1,
+      "p99": 158.9,
+      "max": 158.9
+    },
+    "strokeAck": {
+      "count": 965,
+      "mean": 35.2,
+      "p50": 33.9,
+      "p95": 43.7,
+      "p99": 73.3,
+      "max": 151.2
+    },
+    "strokeToOthers": {
+      "count": 15134,
+      "mean": 34.9,
+      "p50": 33.9,
+      "p95": 43.7,
+      "p99": 67.4,
+      "max": 269.7
+    },
+    "undoAck": {
+      "count": 100,
+      "mean": 38.5,
+      "p50": 36.1,
+      "p95": 47,
+      "p99": 80.5,
+      "max": 95.7
+    },
+    "undoToOthers": {
+      "count": 1569,
+      "mean": 38.5,
+      "p50": 36.9,
+      "p95": 47.5,
+      "p99": 91.3,
+      "max": 117.9
+    },
+    "cursorToOthers": {
+      "count": 903271,
+      "mean": 46.5,
+      "p50": 44.3,
+      "p95": 73.1,
+      "p99": 78.1,
+      "max": 319.5
+    },
+    "liveToOthers": {
+      "count": 297647,
+      "mean": 48.9,
+      "p50": 47,
+      "p95": 76.2,
+      "p99": 82,
+      "max": 319.5
+    },
+    "serverProbe": {
+      "count": 222,
+      "mean": 21,
+      "p50": 20.1,
+      "p95": 23.8,
+      "p99": 27.2,
+      "max": 92.3
+    }
+  },
+  "throughput": {
+    "sentPerS": 1343,
+    "receivedPerS": 2299,
+    "kbOutPerS": 200.5,
+    "kbInPerS": 12888.4,
+    "sent": {
+      "cursor": 59850,
+      "live": 19683,
+      "stroke": 965,
+      "visibility": 100
+    },
+    "received": {
+      "welcome": 50,
+      "snapshot": 50,
+      "peer-joined": 1225,
+      "batch": 83350,
+      "batch.cursor": 2822939,
+      "batch.live": 929971,
+      "stroke": 47285,
+      "ack": 1065,
+      "visibility": 4900
+    }
+  },
+  "ephemeralDelivered": {
+    "cursor": 0.9626,
+    "livePoints": 1
+  },
+  "generatorThreadUtilization": [0.11, 0.11, 0.1],
+  "unexpectedCloses": 0,
+  "errors": {},
+  "consistency": "ok"
+}

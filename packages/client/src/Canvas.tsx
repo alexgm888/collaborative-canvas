@@ -5,6 +5,10 @@ import type { Point, Stroke } from '@canvas/shared';
 interface CanvasProps {
   color: string;
   width: number;
+  /** Strokes already saved for this canvas. Only read on mount. */
+  initialStrokes: Stroke[];
+  /** Called once per finished stroke, e.g. to save it. */
+  onStrokeEnd: (stroke: Stroke) => void;
 }
 
 function drawStroke(ctx: CanvasRenderingContext2D, stroke: Stroke): void {
@@ -31,9 +35,9 @@ function drawStroke(ctx: CanvasRenderingContext2D, stroke: Stroke): void {
   ctx.stroke();
 }
 
-export function Canvas({ color, width }: CanvasProps) {
+export function Canvas({ color, width, initialStrokes, onStrokeEnd }: CanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [strokes, setStrokes] = useState<Stroke[]>([]);
+  const [strokes, setStrokes] = useState<Stroke[]>(initialStrokes);
   const currentRef = useRef<Stroke | null>(null);
 
   const redraw = useCallback((all: Stroke[], current: Stroke | null) => {
@@ -94,6 +98,7 @@ export function Canvas({ color, width }: CanvasProps) {
     if (!current) return;
     currentRef.current = null;
     setStrokes((prev) => [...prev, current]);
+    onStrokeEnd(current);
   };
 
   return (

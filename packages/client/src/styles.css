@@ -88,3 +88,28 @@ body {
   cursor: crosshair;
   touch-action: none;
 }
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 0.875rem;
+}
+
+.meta a {
+  color: #2563eb;
+}
+
+.save-state {
+  color: #6b7280;
+}
+
+.save-state.failed {
+  color: #dc2626;
+}
+
+.notice {
+  margin: 48px auto;
+  text-align: center;
+  color: #4b5563;
+}

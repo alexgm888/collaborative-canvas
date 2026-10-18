@@ -1,4 +1,4 @@
-import type { Point, Stroke } from '@canvas/shared';
+import type { Point, Stroke, Visibility } from '@canvas/shared';
 
 // Limits for data coming from clients. They are generous for real drawing
 // (the toolbar tops out at width 24) but keep a single request from storing
@@ -125,4 +125,29 @@ export function parseProfile(params: URLSearchParams): { name: string; color: st
 export function parseSince(value: string | null): number {
   if (value === null || !/^\d{1,15}$/.test(value)) return 0;
   return Number(value);
+}
+
+/** An undo or redo: which stroke, and whether it is shown or hidden. */
+export function parseVisibility(input: unknown): ParseResult<Visibility> {
+  if (!isRecord(input)) return { ok: false, error: 'change must be an object' };
+  const { id, strokeId, visible } = input;
+  if (typeof id !== 'string' || !UUID_RE.test(id)) {
+    return { ok: false, error: 'id must be a UUID' };
+  }
+  if (typeof strokeId !== 'string' || !UUID_RE.test(strokeId)) {
+    return { ok: false, error: 'strokeId must be a UUID' };
+  }
+  if (typeof visible !== 'boolean') return { ok: false, error: 'visible must be a boolean' };
+  return {
+    ok: true,
+    value: { id: id.toLowerCase(), strokeId: strokeId.toLowerCase(), visible },
+  };
+}
+
+/**
+ * The `user` of the WebSocket URL: who may undo the strokes this connection
+ * saves. Missing or invalid means nobody, and the connection cannot undo.
+ */
+export function parseUserId(value: string | null): string | null {
+  return value !== null && UUID_RE.test(value) ? value.toLowerCase() : null;
 }

@@ -4,7 +4,7 @@ Real-time collaborative canvas built with React, TypeScript and WebSockets.
 
 **Demo:** https://collaborative-canvas-production-1837.up.railway.app
 
-> **Estado:** en desarrollo (semana 5 de 8). Cada lienzo tiene su propia URL (`/c/<id>`) y quien la abra dibuja en el mismo lienzo en tiempo real: se ven los trazos de los demás mientras los dibujan, sus cursores con nombre y quién está conectado. Cada trazo terminado se guarda en PostgreSQL con un número de secuencia propio del lienzo; si se corta la conexión, los pendientes se reenvían al volver y solo se descargan los trazos que faltan.
+> **Estado:** en desarrollo (semana 6 de 8). Cada lienzo tiene su propia URL (`/c/<id>`) y quien la abra dibuja en el mismo lienzo en tiempo real: se ven los trazos de los demás mientras los dibujan, sus cursores con nombre y quién está conectado. Cada trazo terminado se guarda en PostgreSQL con un número de secuencia propio del lienzo; si se corta la conexión, los pendientes se reenvían al volver y solo se descargan los trazos que faltan. Cada persona puede deshacer y rehacer sus propios trazos (Ctrl+Z, Ctrl+Shift+Z) sin tocar los de los demás.
 
 ## Estructura
 
@@ -56,22 +56,24 @@ Al abrir `/` se crea un lienzo nuevo y la URL pasa a `/c/<id>`; comparte esa URL
 | Método y ruta                    | Qué hace                                                                                        |
 | -------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `POST /api/canvases`             | Crea un lienzo. `201 { id }`                                                                    |
-| `GET /api/canvases/:id`          | Lienzo con sus trazos en orden (cada uno con su `seq`). `200 { id, strokes }` o `404`           |
+| `GET /api/canvases/:id`          | Lienzo con sus trazos visibles en orden (cada uno con su `seq`). `200 { id, strokes }` o `404`  |
 | `POST /api/canvases/:id/strokes` | Guarda un trazo. `201 { id, seq }` si es nuevo, `200` si ese `id` ya existía, `400`/`404`/`409` |
 | `GET /api/health`                | Estado del servidor y de la base de datos. `200` o `503`                                        |
 
 ### Tiempo real
 
-El cliente abre un WebSocket en `/api/canvases/:id/ws?name=…&color=…&since=…` por lienzo; `name` y `color` son el seudónimo con el que le ven los demás y `since`, el último `seq` hasta el que tiene todos los trazos (0 la primera vez). Los mensajes son JSON y sus tipos están en `packages/shared` (`ClientMessage` y `ServerMessage`):
+El cliente abre un WebSocket en `/api/canvases/:id/ws?name=…&color=…&user=…&since=…` por lienzo; `name` y `color` son el seudónimo con el que le ven los demás, `user` es un UUID secreto de la pestaña que identifica sus trazos para poder deshacerlos y `since`, el último `seq` hasta el que tiene todas las operaciones (0 la primera vez). Los mensajes son JSON y sus tipos están en `packages/shared` (`ClientMessage` y `ServerMessage`):
 
 | Dirección          | Mensaje                                        | Cuándo                                                           |
 | ------------------ | ---------------------------------------------- | ---------------------------------------------------------------- |
 | servidor → cliente | `welcome { peers }`                            | Al entrar en la sala: quién más está y dónde tiene el cursor     |
-| servidor → cliente | `snapshot { since, strokes }`                  | Después: los trazos con `seq` mayor que `since`, en orden        |
+| servidor → cliente | `snapshot { since, strokes, changes }`         | Después: trazos y cambios con `seq` mayor que `since`, en orden  |
 | cliente → servidor | `stroke { stroke }`                            | Al terminar un trazo, y otra vez al reconectar si no hubo ack    |
-| servidor → cliente | `ack { id, seq }`                              | El trazo está guardado con ese `seq`                             |
+| cliente → servidor | `visibility { change }`                        | Deshacer (`visible: false`) o rehacer un trazo propio            |
+| servidor → cliente | `ack { id, seq }`                              | El trazo o el cambio está guardado con ese `seq`                 |
 | servidor → cliente | `stroke { stroke }`                            | Otro usuario del mismo lienzo terminó un trazo (con su `seq`)    |
-| servidor → cliente | `rejected { id, error }`                       | El trazo no es válido y no se guardará                           |
+| servidor → cliente | `visibility { change }`                        | Otro usuario deshizo o rehízo uno de sus trazos (con su `seq`)   |
+| servidor → cliente | `rejected { id, error }`                       | El trazo o el cambio no es válido y no se guardará               |
 | servidor → cliente | `not-found` y cierre `4404`                    | El lienzo no existe                                              |
 | cliente → servidor | `live { stroke }`                              | Mientras se dibuja, hasta 20 por segundo, solo los puntos nuevos |
 | servidor → cliente | `live { peerId, stroke }`                      | Puntos nuevos del trazo que otro está dibujando (no guardados)   |
@@ -83,6 +85,8 @@ El cliente abre un WebSocket en `/api/canvases/:id/ws?name=…&color=…&since=�
 `live` y `cursor` son efímeros: no se guardan, no esperan a la base de datos y el servidor los descarta si un cliente envía demasiados o no da abasto para recibirlos (decisión 011).
 
 Cada lienzo numera sus trazos guardados 1, 2, 3… sin huecos, y todos los clientes los dibujan en ese orden. Al reconectar, el cliente pide los posteriores al último número que tiene sin huecos, no al mayor que ha visto (decisión 012).
+
+Deshacer no borra: oculta el trazo con un cambio de visibilidad que se numera en la misma secuencia, y rehacer lo vuelve a mostrar en su sitio. Solo el autor puede cambiar sus trazos (decisión 013).
 
 Sin `DATABASE_URL`, el servidor se conecta a la base de datos de `docker-compose.yml`. Para usar otra, define `DATABASE_URL` (por ejemplo `postgres://usuario:clave@host:5432/bd`). Las migraciones se aplican solas al arrancar.
 

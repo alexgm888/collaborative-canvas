@@ -3,43 +3,97 @@ import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, afterEach, before, beforeEach, describe, it } from 'node:test';
-import type { SavedStroke, ServerMessage, Stroke } from '@canvas/shared';
+import type {
+  SavedStroke,
+  SavedVisibility,
+  ServerMessage,
+  Stroke,
+  Visibility,
+} from '@canvas/shared';
 import { WebSocket } from 'ws';
-import type { InsertResult, StrokeStore } from './db/canvases.js';
+import type { ChangeResult, InsertResult, StrokeStore } from './db/canvases.js';
 import { attachRealtime } from './realtime.js';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** In-memory StrokeStore with the same semantics as the PostgreSQL one. */
 class MemoryStore implements StrokeStore {
-  /** Strokes of each canvas; the seq of each one is its position plus one. */
+  /** Strokes of each canvas, in seq order. */
   canvases = new Map<string, SavedStroke[]>();
+  /** Visibility changes of each canvas, in seq order. */
+  changes = new Map<string, SavedVisibility[]>();
+  /** Who drew each stroke saved with an author. */
+  authors = new Map<string, string>();
   failNextInsert = false;
   existsDelayMs = 0;
+  listDelayMs = 0;
+
+  private lastSeq(canvasId: string): number | null {
+    const strokes = this.canvases.get(canvasId);
+    if (!strokes) return null;
+    return Math.max(0, ...strokes.map((s) => s.seq), ...this.changesOf(canvasId).map((c) => c.seq));
+  }
+
+  private changesOf(canvasId: string): SavedVisibility[] {
+    let list = this.changes.get(canvasId);
+    if (!list) {
+      list = [];
+      this.changes.set(canvasId, list);
+    }
+    return list;
+  }
 
   async getLastSeq(canvasId: string): Promise<number | null> {
     if (this.existsDelayMs > 0) await sleep(this.existsDelayMs);
-    return this.canvases.get(canvasId)?.length ?? null;
+    return this.lastSeq(canvasId);
   }
 
-  listStrokes(canvasId: string, since: number): Promise<SavedStroke[]> {
-    return Promise.resolve((this.canvases.get(canvasId) ?? []).filter((s) => s.seq > since));
+  async listStrokes(canvasId: string, since: number): Promise<SavedStroke[]> {
+    // Read before waiting, like a query that sees the database as it was.
+    const strokes = (this.canvases.get(canvasId) ?? []).filter((s) => s.seq > since);
+    if (this.listDelayMs > 0) await sleep(this.listDelayMs);
+    return strokes;
   }
 
-  insertStroke(canvasId: string, stroke: Stroke): Promise<InsertResult> {
+  listChanges(canvasId: string, since: number): Promise<SavedVisibility[]> {
+    return Promise.resolve(this.changesOf(canvasId).filter((c) => c.seq > since));
+  }
+
+  insertStroke(canvasId: string, stroke: Stroke, authorId: string | null): Promise<InsertResult> {
     if (this.failNextInsert) {
       this.failNextInsert = false;
       return Promise.reject(new Error('database down'));
     }
     const strokes = this.canvases.get(canvasId);
-    if (!strokes) return Promise.resolve({ status: 'canvas-not-found' });
+    const lastSeq = this.lastSeq(canvasId);
+    if (!strokes || lastSeq === null) return Promise.resolve({ status: 'canvas-not-found' });
     for (const [id, list] of this.canvases) {
       const existing = list.find((s) => s.id === stroke.id);
       if (existing && id !== canvasId) return Promise.resolve({ status: 'id-taken' });
       if (existing) return Promise.resolve({ status: 'duplicate', seq: existing.seq });
     }
-    const seq = strokes.length + 1;
+    const seq = lastSeq + 1;
     strokes.push({ ...stroke, seq });
+    if (authorId) this.authors.set(stroke.id, authorId);
+    return Promise.resolve({ status: 'created', seq });
+  }
+
+  insertChange(canvasId: string, userId: string, change: Visibility): Promise<ChangeResult> {
+    const lastSeq = this.lastSeq(canvasId);
+    if (lastSeq === null) return Promise.resolve({ status: 'canvas-not-found' });
+    for (const [id, list] of this.changes) {
+      const existing = list.find((c) => c.id === change.id);
+      if (existing && id !== canvasId) return Promise.resolve({ status: 'id-taken' });
+      if (existing) return Promise.resolve({ status: 'duplicate', seq: existing.seq });
+    }
+    if (!this.canvases.get(canvasId)?.some((s) => s.id === change.strokeId)) {
+      return Promise.resolve({ status: 'stroke-not-found' });
+    }
+    if (this.authors.get(change.strokeId) !== userId) {
+      return Promise.resolve({ status: 'not-author' });
+    }
+    const seq = lastSeq + 1;
+    this.changesOf(canvasId).push({ ...change, seq });
     return Promise.resolve({ status: 'created', seq });
   }
 }
@@ -110,6 +164,17 @@ function saved(n: number, seq: number): SavedStroke {
   return { ...stroke(n), seq };
 }
 
+function change(n: number, strokeN: number, visible = false): Visibility {
+  return {
+    id: `00000000-0000-4000-9000-${String(n).padStart(12, '0')}`,
+    strokeId: stroke(strokeN).id,
+    visible,
+  };
+}
+
+const ALICE = '00000000-0000-4000-a000-00000000a11c';
+const BOB = '00000000-0000-4000-a000-000000000b0b';
+
 describe('realtime', () => {
   const store = new MemoryStore();
   const server = createServer();
@@ -147,12 +212,15 @@ describe('realtime', () => {
       ['room-a', [saved(1, 1)]],
       ['room-b', []],
     ]);
+    store.changes = new Map();
+    store.authors = new Map();
   });
 
   // Every test starts with empty rooms.
   afterEach(async () => {
     for (const c of clients.splice(0)) c.socket.terminate();
     store.existsDelayMs = 0;
+    store.listDelayMs = 0;
     for (let waited = 0; realtime.roomSizes().size > 0; waited += 5) {
       assert.ok(waited < 1000, 'rooms should empty once their clients are gone');
       await sleep(5);
@@ -167,7 +235,12 @@ describe('realtime', () => {
   it('sends who is here and the saved strokes on connect', async () => {
     const client = await connect('room-a');
     assert.deepEqual(await client.next(), { type: 'welcome', peers: [] });
-    assert.deepEqual(await client.next(), { type: 'snapshot', since: 0, strokes: [saved(1, 1)] });
+    assert.deepEqual(await client.next(), {
+      type: 'snapshot',
+      since: 0,
+      strokes: [saved(1, 1)],
+      changes: [],
+    });
   });
 
   it('saves a stroke, acks the sender and broadcasts to the room only', async () => {
@@ -218,17 +291,23 @@ describe('realtime', () => {
       type: 'snapshot',
       since: 1,
       strokes: [saved(2, 2), saved(3, 3)],
+      changes: [],
     });
 
     const carol = await connect('room-a', { query: '?since=3' });
     assert.equal((await carol.next()).type, 'welcome');
-    assert.deepEqual(await carol.next(), { type: 'snapshot', since: 3, strokes: [] });
+    assert.deepEqual(await carol.next(), { type: 'snapshot', since: 3, strokes: [], changes: [] });
   });
 
   it('sends everything to a client that claims seqs the canvas does not have', async () => {
     const client = await connect('room-a', { query: '?since=7' });
     assert.equal((await client.next()).type, 'welcome');
-    assert.deepEqual(await client.next(), { type: 'snapshot', since: 0, strokes: [saved(1, 1)] });
+    assert.deepEqual(await client.next(), {
+      type: 'snapshot',
+      since: 0,
+      strokes: [saved(1, 1)],
+      changes: [],
+    });
   });
 
   it('rejects invalid strokes and keeps the connection open', async () => {
@@ -372,6 +451,134 @@ describe('realtime', () => {
     await sleep(100);
 
     assert.equal(realtime.roomSizes().get('room-b') ?? 0, 0);
+  });
+
+  it('sends operations saved while a snapshot is read after that snapshot', async () => {
+    const alice = await join('room-a');
+    store.listDelayMs = 50;
+    const bob = await connect('room-a');
+    assert.equal((await bob.next()).type, 'welcome');
+
+    // Saved after Bob's snapshot was read, but before it was sent.
+    await sleep(10);
+    alice.sendStroke(stroke(2));
+    assert.equal((await alice.next()).type, 'ack');
+
+    assert.deepEqual(await bob.next(), {
+      type: 'snapshot',
+      since: 0,
+      strokes: [saved(1, 1)],
+      changes: [],
+    });
+    assert.deepEqual(await bob.next(), { type: 'stroke', stroke: saved(2, 2) });
+  });
+
+  describe('undo and redo', () => {
+    it('saves a change by the author, acks it and broadcasts it', async () => {
+      const alice = await join('room-b', { query: `?user=${ALICE}` });
+      const bob = await join('room-b', { query: `?user=${BOB}` });
+      alice.sendStroke(stroke(2));
+      assert.deepEqual(await alice.next(), { type: 'ack', id: stroke(2).id, seq: 1 });
+      assert.equal((await bob.next()).type, 'stroke');
+
+      alice.send({ type: 'visibility', change: change(1, 2) });
+      alice.send({ type: 'visibility', change: change(2, 2, true) });
+
+      assert.deepEqual(await alice.next(), { type: 'ack', id: change(1, 2).id, seq: 2 });
+      assert.deepEqual(await alice.next(), { type: 'ack', id: change(2, 2).id, seq: 3 });
+      assert.deepEqual(await bob.next(), {
+        type: 'visibility',
+        change: { ...change(1, 2), seq: 2 },
+      });
+      assert.deepEqual(await bob.next(), {
+        type: 'visibility',
+        change: { ...change(2, 2, true), seq: 3 },
+      });
+
+      const carol = await connect('room-b', { query: '?since=1' });
+      assert.equal((await carol.next()).type, 'welcome');
+      assert.deepEqual(await carol.next(), {
+        type: 'snapshot',
+        since: 1,
+        strokes: [],
+        changes: [
+          { ...change(1, 2), seq: 2 },
+          { ...change(2, 2, true), seq: 3 },
+        ],
+      });
+    });
+
+    it('saves an undo sent right after its stroke, in order', async () => {
+      const alice = await join('room-b', { query: `?user=${ALICE}` });
+
+      alice.sendStroke(stroke(2));
+      alice.send({ type: 'visibility', change: change(1, 2) });
+
+      assert.equal((await alice.next()).type, 'ack');
+      assert.deepEqual(await alice.next(), { type: 'ack', id: change(1, 2).id, seq: 2 });
+    });
+
+    it('rejects changes to strokes of someone else', async () => {
+      const alice = await join('room-b', { query: `?user=${ALICE}` });
+      const bob = await join('room-b', { query: `?user=${BOB}` });
+      const anonymous = await join('room-b');
+      alice.sendStroke(stroke(2));
+      assert.equal((await alice.next()).type, 'ack');
+
+      bob.send({ type: 'visibility', change: change(1, 2) });
+      anonymous.send({ type: 'visibility', change: change(2, 2) });
+
+      for (const [client, n] of [
+        [bob, 1],
+        [anonymous, 2],
+      ] as const) {
+        const messages = (await client.drain()).filter((m) => m.type !== 'stroke');
+        assert.deepEqual(messages, [
+          { type: 'rejected', id: change(n, 2).id, error: 'only the author can undo a stroke' },
+        ]);
+      }
+      assert.ok(await alice.isQuiet());
+      assert.deepEqual(store.changes.get('room-b') ?? [], []);
+    });
+
+    it('rejects a change to a stroke that is not in the canvas', async () => {
+      const alice = await join('room-b', { query: `?user=${ALICE}` });
+
+      alice.send({ type: 'visibility', change: change(1, 1) });
+
+      assert.deepEqual(await alice.next(), {
+        type: 'rejected',
+        id: change(1, 1).id,
+        error: 'stroke not found',
+      });
+    });
+
+    it('acks a resent change with its original seq without broadcasting it again', async () => {
+      const alice = await join('room-b', { query: `?user=${ALICE}` });
+      const bob = await join('room-b');
+      alice.sendStroke(stroke(2));
+      alice.send({ type: 'visibility', change: change(1, 2) });
+      await alice.drain();
+      await bob.drain();
+
+      alice.send({ type: 'visibility', change: change(1, 2) });
+
+      assert.deepEqual(await alice.next(), { type: 'ack', id: change(1, 2).id, seq: 2 });
+      assert.ok(await bob.isQuiet());
+    });
+
+    it('keeps the author across reconnections', async () => {
+      const first = await join('room-b', { query: `?user=${ALICE}` });
+      first.sendStroke(stroke(2));
+      assert.equal((await first.next()).type, 'ack');
+      first.socket.close();
+      await first.closed;
+
+      const second = await join('room-b', { query: `?user=${ALICE}&since=1` });
+      second.send({ type: 'visibility', change: change(1, 2) });
+
+      assert.deepEqual(await second.next(), { type: 'ack', id: change(1, 2).id, seq: 2 });
+    });
   });
 
   it('removes connections from their room when they close', async () => {

@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type pg from 'pg';
-import { createCanvas, getLastSeq, insertStroke, listStrokes } from './db/canvases.js';
+import { createCanvas, getLastSeq, insertStroke, listVisibleStrokes } from './db/canvases.js';
 import { isDatabaseUp } from './db/pool.js';
 import { isCanvasId, parseStroke } from './validation.js';
 
@@ -83,10 +83,11 @@ async function route(
   if (!isCanvasId(canvasId)) throw new HttpError(404, 'Canvas not found');
 
   if (!match[2] && method === 'GET') {
+    // The picture as it is now: strokes undone by their author are left out.
     // Two queries without a transaction: a stroke saved in between is either
     // included or not, both are valid snapshots.
     if ((await getLastSeq(pool, canvasId)) === null) throw new HttpError(404, 'Canvas not found');
-    const strokes = await listStrokes(pool, canvasId);
+    const strokes = await listVisibleStrokes(pool, canvasId);
     return sendJson(res, 200, { id: canvasId, strokes });
   }
 

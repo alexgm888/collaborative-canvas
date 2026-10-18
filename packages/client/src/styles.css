@@ -64,6 +64,31 @@ body {
   outline-offset: -4px;
 }
 
+.history {
+  display: flex;
+  gap: 4px;
+  margin-left: 12px;
+}
+
+.history button {
+  padding: 4px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  font: inherit;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.history button:hover:not(:disabled) {
+  background: #f3f4f6;
+}
+
+.history button:disabled {
+  color: #9ca3af;
+  cursor: default;
+}
+
 .width {
   display: flex;
   align-items: center;

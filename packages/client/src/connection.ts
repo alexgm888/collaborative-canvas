@@ -17,7 +17,13 @@ export interface CanvasState {
   peers: Peer[];
   /** Strokes others are drawing right now, not saved yet. */
   live: Stroke[];
+  /** Whether there is an own stroke to hide, or a hidden one to show again. */
+  canUndo: boolean;
+  canRedo: boolean;
 }
+
+/** Saved operations waiting for an ack, resent on every (re)connection. */
+type Durable = Extract<ClientMessage, { type: 'stroke' | 'visibility' }>;
 
 // Backoff between reconnection attempts; the last value repeats. Each delay
 // gets random jitter so clients dropped together do not return together.
@@ -37,6 +43,7 @@ function socketUrl(canvasId: string, identity: Identity, since: number): string 
   const query = new URLSearchParams({
     name: identity.name,
     color: identity.color,
+    user: identity.userId,
     since: String(since),
   });
   return `${protocol}//${window.location.host}/api/canvases/${encodeURIComponent(canvasId)}/ws?${query}`;
@@ -52,6 +59,11 @@ function socketUrl(canvasId: string, identity: Identity, since: number): string 
  * strokes after the last seq this client has without gaps, so strokes drawn
  * by others while offline appear without downloading the whole canvas again.
  *
+ * Undo and redo hide and show this tab's own strokes, newest first. They are
+ * operations like strokes: applied at once, kept in the outbox until acked,
+ * and seen by everyone. Others' strokes are never touched, so two people
+ * undoing at the same time cannot get in each other's way.
+ *
  * Cursors and strokes in progress are throttled and sent only while online;
  * losing one is harmless because the next carries newer state, and the final
  * stroke always replaces its live version.
@@ -65,9 +77,16 @@ export class CanvasConnection {
     rejected: 0,
     peers: [],
     live: [],
+    canUndo: false,
+    canRedo: false,
   };
   private readonly listeners = new Set<() => void>();
-  private readonly outbox = new Map<string, Stroke>();
+  /** By the id of the stroke or change; a Map keeps the order they were made in. */
+  private readonly outbox = new Map<string, Durable>();
+  /** Own strokes that undo would hide, newest last. */
+  private readonly undoStack: string[] = [];
+  /** Own strokes that redo would show again, most recently hidden last. */
+  private readonly redoStack: string[] = [];
   private readonly log = new StrokeLog();
   private readonly peers = new Map<string, Peer>();
   /** Strokes in progress by id, with the peer drawing each one. */
@@ -103,10 +122,47 @@ export class CanvasConnection {
   addStroke(stroke: Stroke): void {
     // Unsent live points are not needed: the final stroke has them all.
     if (this.drawing?.id === stroke.id) this.drawing = null;
-    this.outbox.set(stroke.id, stroke);
     this.log.addLocal(stroke);
+    this.undoStack.push(stroke.id);
+    // A new stroke starts a new branch of history, as in any editor.
+    this.redoStack.length = 0;
+    this.enqueue(stroke.id, { type: 'stroke', stroke });
+  }
+
+  /** Hides the last own stroke that is still visible. */
+  undo(): void {
+    const strokeId = this.undoStack.pop();
+    if (strokeId === undefined) return;
+    this.redoStack.push(strokeId);
+    this.changeVisibility(strokeId, false);
+  }
+
+  /** Shows again the last stroke that undo hid. */
+  redo(): void {
+    const strokeId = this.redoStack.pop();
+    if (strokeId === undefined) return;
+    this.undoStack.push(strokeId);
+    this.changeVisibility(strokeId, true);
+  }
+
+  private changeVisibility(strokeId: string, visible: boolean): void {
+    const change = { id: crypto.randomUUID(), strokeId, visible };
+    this.log.addLocalChange(change);
+    this.enqueue(change.id, { type: 'visibility', change });
+  }
+
+  private enqueue(id: string, message: Durable): void {
+    this.outbox.set(id, message);
     this.update({ strokes: this.log.all() });
-    this.send({ type: 'stroke', stroke });
+    this.send(message);
+  }
+
+  /** A stroke that can no longer be hidden or shown leaves the history. */
+  private forget(strokeId: string): void {
+    for (const stack of [this.undoStack, this.redoStack]) {
+      const i = stack.indexOf(strokeId);
+      if (i !== -1) stack.splice(i, 1);
+    }
   }
 
   /**
@@ -142,7 +198,9 @@ export class CanvasConnection {
     this.update({ status: 'connecting' });
 
     socket.onopen = () => {
-      for (const stroke of this.outbox.values()) this.send({ type: 'stroke', stroke });
+      // In the order they were made: an undo must not reach the server
+      // before the stroke it hides.
+      for (const message of this.outbox.values()) this.send(message);
     };
     socket.onmessage = (event) => {
       this.receive(JSON.parse(String(event.data)) as ServerMessage);
@@ -225,10 +283,11 @@ export class CanvasConnection {
         this.attempt = 0;
         // Strokes broadcast before the snapshot was read may be in both; the
         // log keeps one of each.
-        this.log.applySnapshot(message.since, message.strokes);
-        // An own stroke saved before the connection dropped, whose ack never
-        // arrived. The resent copy will be acked anyway.
+        this.log.applySnapshot(message.since, message.strokes, message.changes);
+        // An own operation saved before the connection dropped, whose ack
+        // never arrived. The resent copy will be acked anyway.
         for (const stroke of message.strokes) this.outbox.delete(stroke.id);
+        for (const change of message.changes) this.outbox.delete(change.id);
         this.update({ status: 'online', loaded: true, strokes: this.log.all() });
         return;
       case 'stroke':
@@ -237,17 +296,30 @@ export class CanvasConnection {
         this.live.delete(message.stroke.id);
         this.update({ strokes: this.log.all(), ...this.livePatch() });
         return;
+      case 'visibility':
+        if (this.log.addSavedChange(message.change)) this.update({ strokes: this.log.all() });
+        return;
       case 'ack':
         this.outbox.delete(message.id);
         this.log.confirm(message.id, message.seq);
         this.update({ strokes: this.log.all() });
         return;
-      case 'rejected':
-        console.error('Stroke rejected by the server:', message.error);
-        if (message.id !== null && this.outbox.delete(message.id)) {
+      case 'rejected': {
+        console.error('Rejected by the server:', message.error);
+        const refused = message.id === null ? undefined : this.outbox.get(message.id);
+        if (!refused || message.id === null) return;
+        this.outbox.delete(message.id);
+        if (refused.type === 'stroke') {
+          // It stays on screen, marked as not saved; there is nothing to undo.
+          this.forget(refused.stroke.id);
           this.update({ rejected: this.state.rejected + 1 });
+        } else {
+          this.log.dropLocalChange(message.id);
+          this.forget(refused.change.strokeId);
+          this.update({ strokes: this.log.all() });
         }
         return;
+      }
       case 'not-found':
         // The close event (4404) that follows sets the status.
         return;
@@ -295,7 +367,13 @@ export class CanvasConnection {
   }
 
   private update(patch: Partial<CanvasState>): void {
-    this.state = { ...this.state, ...patch, pending: this.outbox.size };
+    this.state = {
+      ...this.state,
+      ...patch,
+      pending: this.outbox.size,
+      canUndo: this.undoStack.length > 0,
+      canRedo: this.redoStack.length > 0,
+    };
     for (const listener of this.listeners) listener();
   }
 }

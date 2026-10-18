@@ -1,4 +1,4 @@
-import { writeFile } from 'node:fs/promises';
+import { appendFile, writeFile } from 'node:fs/promises';
 import { availableParallelism } from 'node:os';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -76,13 +76,32 @@ async function createCanvas(): Promise<string> {
   return ((await res.json()) as { id: string }).id;
 }
 
-/** The operations of a canvas as a client that joins now gets them. */
-async function loadCanvas(canvasId: string): Promise<Map<number, string>> {
+/**
+ * The operations of a canvas as a client that joins now gets them, or null if
+ * it cannot join after a few tries (a saturated link, a restarting server).
+ */
+async function loadCanvas(canvasId: string): Promise<Map<number, string> | null> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const ops = await loadCanvasOnce(canvasId).catch(() => null);
+    if (ops) return ops;
+    await sleep(2000 * attempt);
+  }
+  return null;
+}
+
+function loadCanvasOnce(canvasId: string): Promise<Map<number, string>> {
   const url = new URL(`/api/canvases/${canvasId}/ws`, config.url);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   const socket = new WebSocket(url);
   return new Promise((resolve, reject) => {
-    socket.onerror = () => reject(new Error('the verifying client could not connect'));
+    const timeout = setTimeout(() => {
+      socket.close();
+      reject(new Error('no snapshot in time'));
+    }, 15_000);
+    socket.onerror = () => {
+      clearTimeout(timeout);
+      reject(new Error('the verifying client could not connect'));
+    };
     socket.onmessage = (event) => {
       const message = JSON.parse(String(event.data)) as {
         type: string;
@@ -90,6 +109,7 @@ async function loadCanvas(canvasId: string): Promise<Map<number, string>> {
         changes: { seq: number; id: string }[];
       };
       if (message.type !== 'snapshot') return;
+      clearTimeout(timeout);
       socket.close();
       resolve(new Map([...message.strokes, ...message.changes].map((op) => [op.seq, op.id])));
     };
@@ -258,6 +278,10 @@ async function main(): Promise<void> {
   const unacked = stopped.reduce((n, s) => n + s.unacked, 0);
   if (unacked > 0) problems.push(`${unacked} operations never acked`);
   const clients = reports.flatMap((r) => r.clients);
+  // Every report is in: close the simulated clients first, so their traffic
+  // does not crowd out the verifying client on a slow link.
+  tell({ type: 'close' });
+  await sleep(500);
   // Deliveries a server that dropped and merged nothing would make: each
   // cursor and live point to everyone else in its canvas.
   const expected = { cursor: 0, livePoints: 0 };
@@ -268,9 +292,12 @@ async function main(): Promise<void> {
       expected.livePoints += c.ephemeralSent.livePoints * (inRoom.length - 1);
     }
     const reference = await loadCanvas(canvasId);
+    if (!reference) {
+      problems.push(`${canvasId}: could not load the canvas to check it`);
+      continue;
+    }
     problems.push(...checkConsistency(inRoom, reference).map((p) => `${canvasId}: ${p}`));
   }
-  tell({ type: 'close' });
 
   // Messages inside batches are counted apart ("batch.cursor"), not as frames.
   const total = (map: Map<string, number>) =>
@@ -328,6 +355,30 @@ async function main(): Promise<void> {
       resolve(process.env.INIT_CWD ?? '.', args.out),
       JSON.stringify(results, null, 2) + '\n',
     );
+
+  // On GitHub Actions, the same table shows on the run's page.
+  const summaryFile = process.env.GITHUB_STEP_SUMMARY;
+  if (summaryFile) {
+    const rows = Object.entries(results.latencyMs).map(
+      ([name, s]) => `| ${name} | ${s.count} | ${s.p50} | ${s.p95} | ${s.p99} | ${s.max} |`,
+    );
+    const summary = [
+      `## Load test: ${config.clients} clients, ${config.rooms} canvas(es), ${config.durationS} s`,
+      '',
+      `Server: ${config.url}`,
+      '',
+      '| Latency (ms) | count | p50 | p95 | p99 | max |',
+      '| --- | --: | --: | --: | --: | --: |',
+      ...rows,
+      '',
+      `- Received: ${results.throughput.receivedPerS} messages/s, ${results.throughput.kbInPerS} KB/s`,
+      `- Ephemeral delivered: ${JSON.stringify(results.ephemeralDelivered)}`,
+      `- Generator threads busy: ${JSON.stringify(results.generatorThreadUtilization)}`,
+      `- Consistency: ${problems.length === 0 ? 'ok' : problems.join('; ')}`,
+      '',
+    ].join('\n');
+    await appendFile(summaryFile, summary);
+  }
   process.exitCode = problems.length === 0 && unexpectedCloses === 0 ? 0 : 1;
 }
 

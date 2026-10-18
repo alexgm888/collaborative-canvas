@@ -6,6 +6,11 @@ import type { Point, Stroke } from '@canvas/shared';
 export const MAX_POINTS_PER_STROKE = 10_000;
 export const MAX_STROKE_WIDTH = 64;
 export const MAX_COORDINATE = 100_000;
+// A `live` message carries only the points drawn since the previous one
+// (about 50 ms of drawing), so this is far above what a real client sends.
+export const MAX_POINTS_PER_LIVE_MESSAGE = 1_000;
+export const MAX_NAME_LENGTH = 32;
+export const DEFAULT_PROFILE = { name: 'Anónimo', color: '#6b7280' };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const COLOR_RE = /^#[0-9a-f]{6}$/i;
@@ -27,11 +32,20 @@ function isCoordinate(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= MAX_COORDINATE;
 }
 
+function parsePoint(input: unknown): Point | null {
+  if (!isRecord(input) || !isCoordinate(input.x) || !isCoordinate(input.y)) return null;
+  return { x: input.x, y: input.y };
+}
+
 /**
  * Checks an untrusted value and returns a Stroke with only the known fields,
- * so unexpected properties are never stored.
+ * so unexpected properties are never stored. `maxPoints` is lower for the
+ * partial strokes of `live` messages.
  */
-export function parseStroke(input: unknown): ParseResult<Stroke> {
+export function parseStroke(
+  input: unknown,
+  maxPoints = MAX_POINTS_PER_STROKE,
+): ParseResult<Stroke> {
   if (!isRecord(input)) return { ok: false, error: 'stroke must be an object' };
 
   const { id, color, width, points } = input;
@@ -53,23 +67,53 @@ export function parseStroke(input: unknown): ParseResult<Stroke> {
   if (!Array.isArray(points) || points.length === 0) {
     return { ok: false, error: 'points must be a non-empty array' };
   }
-  if (points.length > MAX_POINTS_PER_STROKE) {
-    return { ok: false, error: `a stroke can have at most ${MAX_POINTS_PER_STROKE} points` };
+  if (points.length > maxPoints) {
+    return { ok: false, error: `a stroke can have at most ${maxPoints} points` };
   }
 
   const cleanPoints: Point[] = [];
   for (const p of points) {
-    if (!isRecord(p) || !isCoordinate(p.x) || !isCoordinate(p.y)) {
+    const point = parsePoint(p);
+    if (!point) {
       return {
         ok: false,
         error: `points must be {x, y} with finite numbers within ±${MAX_COORDINATE}`,
       };
     }
-    cleanPoints.push({ x: p.x, y: p.y });
+    cleanPoints.push(point);
   }
 
   return {
     ok: true,
     value: { id: id.toLowerCase(), color: color.toLowerCase(), width, points: cleanPoints },
+  };
+}
+
+/** A cursor position: a point, or null when the pointer left the canvas. */
+export function parseCursor(input: unknown): ParseResult<Point | null> {
+  if (input === null) return { ok: true, value: null };
+  const point = parsePoint(input);
+  return point
+    ? { ok: true, value: point }
+    : { ok: false, error: 'position must be null or {x, y} within the coordinate limits' };
+}
+
+/**
+ * The name and color a client shows to others, from the WebSocket URL. They
+ * are cosmetic, so anything invalid falls back to a default instead of
+ * refusing the connection.
+ */
+export function parseProfile(params: URLSearchParams): { name: string; color: string } {
+  // Control characters could break the layout of other people's screens.
+  const clean = (params.get('name') ?? '')
+    .replace(/[\p{Cc}\p{Cf}]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  // Spread to cut by code points, never in the middle of an emoji.
+  const name = [...clean].slice(0, MAX_NAME_LENGTH).join('').trim();
+  const color = params.get('color') ?? '';
+  return {
+    name: name || DEFAULT_PROFILE.name,
+    color: COLOR_RE.test(color) ? color.toLowerCase() : DEFAULT_PROFILE.color,
   };
 }

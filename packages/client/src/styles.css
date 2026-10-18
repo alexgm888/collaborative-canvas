@@ -78,15 +78,88 @@ body {
   padding: 16px;
 }
 
+/* Both canvas layers and the cursors share this box and its coordinates. */
+.surface {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.15);
+}
+
 .canvas {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
-  background: #fff;
-  border-radius: 8px;
-  box-shadow: 0 1px 3px rgb(0 0 0 / 0.15);
+}
+
+.canvas-live {
   cursor: crosshair;
   touch-action: none;
+}
+
+.cursors {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.cursor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  /* About one message interval, so the pointer glides between updates. */
+  transition: transform 60ms linear;
+  will-change: transform;
+}
+
+.cursor svg {
+  /* The arrow tip is at (1, 1) of the icon. */
+  margin: -1px 0 0 -1px;
+}
+
+.cursor-label {
+  margin-top: 14px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.peers {
+  display: flex;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-left: -6px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.avatar:first-child {
+  margin-left: 0;
+}
+
+.avatar.more {
+  background: #6b7280;
 }
 
 .meta {

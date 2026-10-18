@@ -6,7 +6,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': 'http://localhost:3001',
+      // ws: also proxy the WebSocket upgrade at /api/canvases/:id/ws.
+      '/api': { target: 'http://localhost:3001', ws: true },
     },
   },
 });

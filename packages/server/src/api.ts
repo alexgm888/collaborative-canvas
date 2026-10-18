@@ -9,9 +9,6 @@ import { isCanvasId, parseStroke } from './validation.js';
 // while reading, before it is buffered in full.
 const MAX_BODY_BYTES = 1024 * 1024;
 
-// PostgreSQL error code for a foreign key violation.
-const FOREIGN_KEY_VIOLATION = '23503';
-
 class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -97,18 +94,10 @@ async function route(
     const parsed = parseStroke(await readJson(req));
     if (!parsed.ok) throw new HttpError(400, parsed.error);
 
-    try {
-      const created = await insertStroke(pool, canvasId, parsed.value);
-      // 200 on a duplicate id: the client retried a stroke that was already saved.
-      return sendJson(res, created ? 201 : 200, { id: parsed.value.id });
-    } catch (err) {
-      // Checking the canvas first would cost a query on every stroke; the
-      // foreign key already enforces it.
-      if ((err as { code?: string }).code === FOREIGN_KEY_VIOLATION) {
-        throw new HttpError(404, 'Canvas not found');
-      }
-      throw err;
-    }
+    const result = await insertStroke(pool, canvasId, parsed.value);
+    if (result === 'canvas-not-found') throw new HttpError(404, 'Canvas not found');
+    // 200 on a duplicate id: the client retried a stroke that was already saved.
+    return sendJson(res, result === 'created' ? 201 : 200, { id: parsed.value.id });
   }
 
   throw new HttpError(405, 'Method not allowed');

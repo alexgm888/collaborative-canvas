@@ -4,14 +4,14 @@ Real-time collaborative canvas built with React, TypeScript and WebSockets.
 
 **Demo:** https://collaborative-canvas-production-1837.up.railway.app
 
-> **Estado:** en desarrollo (semana 2 de 8). Cada lienzo tiene su propia URL (`/c/<id>`) y sus trazos se guardan en PostgreSQL, así que sobreviven a recargar la página. La colaboración en tiempo real llega en las semanas 3 y 4.
+> **Estado:** en desarrollo (semana 3 de 8). Cada lienzo tiene su propia URL (`/c/<id>`) y quien la abra dibuja en el mismo lienzo en tiempo real: cada trazo terminado se guarda en PostgreSQL y llega al resto por WebSocket. Si se corta la conexión, los trazos pendientes se reenvían al volver. Trazos en vivo mientras se dibujan, cursores y presencia llegan en la semana 4.
 
 ## Estructura
 
 ```
 packages/
   client/   React + TypeScript + Vite (canvas)
-  server/   Node.js + TypeScript (API, PostgreSQL y servidor de estáticos)
+  server/   Node.js + TypeScript (API, WebSockets, PostgreSQL y estáticos)
   shared/   Tipos compartidos entre cliente y servidor
 DECISIONES.md   Registro de decisiones técnicas
 ```
@@ -59,6 +59,19 @@ Al abrir `/` se crea un lienzo nuevo y la URL pasa a `/c/<id>`; comparte esa URL
 | `GET /api/canvases/:id`          | Lienzo con sus trazos en orden. `200 { id, strokes }` o `404`                 |
 | `POST /api/canvases/:id/strokes` | Guarda un trazo. `201` si es nuevo, `200` si ese `id` ya existía, `400`/`404` |
 | `GET /api/health`                | Estado del servidor y de la base de datos. `200` o `503`                      |
+
+### Tiempo real
+
+El cliente abre un WebSocket en `/api/canvases/:id/ws` por lienzo. Los mensajes son JSON y sus tipos están en `packages/shared` (`ClientMessage` y `ServerMessage`):
+
+| Dirección          | Mensaje                     | Cuándo                                                        |
+| ------------------ | --------------------------- | ------------------------------------------------------------- |
+| servidor → cliente | `snapshot { strokes }`      | Nada más conectar (y en cada reconexión): el lienzo completo  |
+| cliente → servidor | `stroke { stroke }`         | Al terminar un trazo, y otra vez al reconectar si no hubo ack |
+| servidor → cliente | `ack { id }`                | El trazo está guardado                                        |
+| servidor → cliente | `stroke { stroke }`         | Otro usuario del mismo lienzo terminó un trazo                |
+| servidor → cliente | `rejected { id, error }`    | El trazo no es válido y no se guardará                        |
+| servidor → cliente | `not-found` y cierre `4404` | El lienzo no existe                                           |
 
 Sin `DATABASE_URL`, el servidor se conecta a la base de datos de `docker-compose.yml`. Para usar otra, define `DATABASE_URL` (por ejemplo `postgres://usuario:clave@host:5432/bd`). Las migraciones se aplican solas al arrancar.
 
